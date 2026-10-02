@@ -6,6 +6,7 @@ pydantic-settings==2.15.0
 email-validator==2.3.0
 PyJWT==2.15.1
 bcrypt==5.0.0
+openpyxl==3.1.5
 
 # dev / test
 pytest==9.1.1

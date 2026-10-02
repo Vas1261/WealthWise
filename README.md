@@ -10,6 +10,7 @@ backend/    FastAPI + SQLAlchemy + Alembic (Python 3.11)
   app/api/           Presentation: route handlers, no calculation logic
   app/services/      Service: orchestration/sequencing only
   app/domain/        Business/Domain: pure functions, no DB/HTTP/framework imports
+  app/adapters/      Broker file adapters (Adapter Pattern): read exports into NormalizedHolding, no DB access
   app/repositories/  Repository: persistence via SQLAlchemy only (no raw SQL)
   app/models/        ORM models (User, ImportBatch, Holding)
   app/core/          Settings and database session
@@ -56,5 +57,12 @@ npm run dev                                    # http://localhost:5173
     issues the cookie).
   - Passwords: bcrypt, 8–72 UTF-8 bytes (rejected, never truncated). Emails are trimmed
     and lowercased. Registering does not log the user in.
+- **Broker adapters** implement `BrokerAdapter`. `can_parse(file_path)` matches the spec;
+  `parse(file_path, import_batch_id) -> ParseResult` extends the spec's `parse(file_path)`
+  so it can stamp the import batch id and report per-row errors and the statement date.
+  Financial values are exact `Decimal`s; invalid rows are reported, never coerced to zero.
+- **Sample broker files** live in the git-ignored `sample_data/` folder as private reference
+  fixtures. Tests that use them skip when they are absent; all other adapter tests generate
+  small synthetic `.xlsx` files, so a fresh clone has a fully runnable test suite.
 - **Never commit** secrets, `.env`, SQLite databases, virtual environments,
   `node_modules`, or personal/sample broker files (`*.xlsx`, `*.csv` are ignored).
