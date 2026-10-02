@@ -9,6 +9,10 @@ from alembic.config import Config
 # Point the app at a throwaway database before any app module creates its engine.
 _db_file = Path(tempfile.mkdtemp()) / "test.db"
 os.environ["DATABASE_URL"] = f"sqlite:///{_db_file}"
+os.environ["APP_ENV"] = "test"
+os.environ["JWT_SECRET"] = "test-secret-" + "x" * 40
+# The test client talks plain HTTP, which never sends Secure cookies back.
+os.environ["COOKIE_SECURE"] = "false"
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 

@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from app.core.database import SessionLocal, engine
 from app.models import Holding, ImportBatch, User
 
-EXPECTED_TABLES = {"users", "import_batches", "holdings"}
+EXPECTED_TABLES = {"users", "import_batches", "holdings", "sessions"}
 
 
 def table_names() -> set[str]:

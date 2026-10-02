@@ -7,3 +7,56 @@ body {
   margin: 0;
   padding: 2rem;
 }
+
+main {
+  max-width: 28rem;
+}
+
+.card {
+  border: 1px solid #8884;
+  border-radius: 8px;
+  padding: 1rem 1.5rem;
+}
+
+form {
+  display: grid;
+  gap: 0.75rem;
+}
+
+label {
+  display: grid;
+  gap: 0.25rem;
+}
+
+input {
+  font: inherit;
+  padding: 0.4rem;
+}
+
+button {
+  font: inherit;
+  padding: 0.4rem 0.8rem;
+  cursor: pointer;
+}
+
+button.link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  text-decoration: underline;
+}
+
+.hint,
+.health {
+  font-size: 0.85rem;
+  opacity: 0.75;
+}
+
+.error {
+  color: #d33;
+}
+
+.notice {
+  color: #2a7;
+}

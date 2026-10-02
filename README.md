@@ -23,12 +23,12 @@ frontend/   React + Vite + TypeScript
 # Backend
 cd backend
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-cp .env.example .env
+cp .env.example .env   # then set JWT_SECRET (see the comment in the file)
 .venv/bin/alembic upgrade head
 .venv/bin/uvicorn app.main:app --reload        # http://127.0.0.1:8000/health
 .venv/bin/pytest
 
-# Frontend (proxies /health to the backend)
+# Frontend (proxies /api and /health to the backend)
 cd frontend
 npm install
 npm run dev                                    # http://localhost:5173
@@ -43,5 +43,18 @@ npm run dev                                    # http://localhost:5173
   user + broker + asset class; an older statement uploaded after a newer one must
   not overwrite the newer snapshot.
 - **Frontend** is React + Vite + TypeScript.
+- **Authentication** (Module 2):
+  - Access JWT (15 min; claims `sub`, `sid`, `type`, `iat`, `exp`) and an opaque refresh
+    token (7 days) in HttpOnly, SameSite=Lax cookies. `COOKIE_SECURE` defaults to true and
+    the API refuses to start with `APP_ENV=production` and `COOKIE_SECURE=false`.
+  - Each login creates a row in `sessions`, which stores only the SHA-256 hash of the
+    current refresh token. Refresh rotates it in place; presenting an already-rotated
+    token revokes the session. Every authenticated request checks the session is active,
+    so logout takes effect immediately. Logout revokes only the current session.
+  - CSRF: double-submit token (readable `ww_csrf` cookie echoed in `X-CSRF-Token`) on
+    every state-changing request, including register and login (`GET /api/auth/csrf`
+    issues the cookie).
+  - Passwords: bcrypt, 8–72 UTF-8 bytes (rejected, never truncated). Emails are trimmed
+    and lowercased. Registering does not log the user in.
 - **Never commit** secrets, `.env`, SQLite databases, virtual environments,
   `node_modules`, or personal/sample broker files (`*.xlsx`, `*.csv` are ignored).
