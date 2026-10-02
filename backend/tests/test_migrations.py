@@ -44,8 +44,8 @@ def test_holding_round_trips_decimals_exactly(migrated_db):
         )
         batch.holdings.append(
             Holding(
-                instrument_name="CDSL", isin="INE736A01011", symbol="CDSL", asset_class="equity",
-                quantity=Decimal("22.791"), average_buy_price=Decimal("697.4455"),
+                instrument_name="SYNTHETIC CORP", isin="INE000C01018", symbol="SYNTH", asset_class="equity",
+                quantity=Decimal("17.583"), average_buy_price=Decimal("528.6173"),
                 native_currency="INR", source_broker="zerodha",
             )
         )
@@ -54,8 +54,8 @@ def test_holding_round_trips_decimals_exactly(migrated_db):
 
     with SessionLocal() as session:
         holding = session.query(Holding).one()
-        assert holding.quantity == Decimal("22.791")
-        assert holding.average_buy_price == Decimal("697.4455")
+        assert holding.quantity == Decimal("17.583")
+        assert holding.average_buy_price == Decimal("528.6173")
         assert user.reporting_currency == "INR"
 
 
