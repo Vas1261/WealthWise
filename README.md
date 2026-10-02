@@ -61,6 +61,27 @@ npm run dev                                    # http://localhost:5173
   `parse(file_path, import_batch_id) -> ParseResult` extends the spec's `parse(file_path)`
   so it can stamp the import batch id and report per-row errors and the statement date.
   Financial values are exact `Decimal`s; invalid rows are reported, never coerced to zero.
+- **Zerodha equity recognition (D1)**, for the Module 4 adapter. The real export titles its
+  sheets "Combined/Equity/Mutual Funds Holdings Statement as on <date>", while spec 3.2/4.2
+  quote only "Equity Holdings Statement"; the spec is unchanged and this rule applies it:
+  - A sheet qualifies only if it has a `Client ID` label, exactly one title that is
+    `Combined Holdings Statement as on YYYY-MM-DD` or `Equity Holdings Statement as on
+    YYYY-MM-DD` (whitespace-collapsed, case-sensitive; `Mutual Funds Holdings Statement` is
+    never accepted), and, below that title, a header row with exactly matched `Symbol`,
+    `ISIN`, `Quantity Available` and `Average Price`. Recognition is by content only, never
+    by file name, sheet name, or file date.
+  - Sheet priority: the qualifying `Combined` sheet, else the qualifying `Equity` sheet,
+    else the workbook is rejected. Only one sheet is read; sheets are never merged.
+  - The statement date comes only from the selected sheet's title (strict `YYYY-MM-DD`);
+    never from the file name, file dates, `Previous Closing Price`, or transaction dates.
+    A missing, invalid, or duplicated title rejects the workbook rather than guessing.
+  - On `Combined`, a row's `Instrument Type` must be `-` (equity); any other value,
+    including blank, is reported as an unsupported-instrument-type row error, never
+    imported as equity. Instruments are not classified by ISIN prefix (ETFs carry `INF`
+    ISINs). A `Combined` sheet without an `Instrument Type` column does not qualify, so
+    the `Equity` fallback applies. The `Equity` sheet has no `Instrument Type` column.
+  - Other columns (discrepant/long-term/pledged quantities, `Sector`, `Previous Closing
+    Price`, P&L columns) are not read.
 - **Sample broker files** live in the git-ignored `sample_data/` folder as private reference
   fixtures. Tests that use them skip when they are absent; all other adapter tests generate
   small synthetic `.xlsx` files, so a fresh clone has a fully runnable test suite.
