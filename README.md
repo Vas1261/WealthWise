@@ -11,6 +11,7 @@ backend/    FastAPI + SQLAlchemy + Alembic (Python 3.11)
   app/services/      Service: orchestration/sequencing only
   app/domain/        Business/Domain: pure functions, no DB/HTTP/framework imports
   app/adapters/      Broker file adapters (Adapter Pattern): read exports into NormalizedHolding, no DB access
+  app/integrations/  Clients for external APIs (Twelve Data), called only by services
   app/repositories/  Repository: persistence via SQLAlchemy only (no raw SQL)
   app/models/        ORM models (User, ImportBatch, Holding)
   app/core/          Settings and database session
@@ -84,6 +85,26 @@ npm run dev                                    # http://localhost:5173
     the `Equity` fallback applies. The `Equity` sheet has no `Instrument Type` column.
   - Other columns (discrepant/long-term/pledged quantities, `Sector`, `Previous Closing
     Price`, P&L columns) are not read.
+- **Market data (Module 6, decisions M1-M14).** `services/market_service.py` resolves ISINs to
+  Twelve Data listings and serves cached live prices; it never invents a price and never uses a
+  broker file's closing price. Market data is public, so both caches are global (no user link).
+  - Symbol lookup: Twelve Data `/symbol_search` by ISIN first, then by the broker's own ticker
+    (Zerodha); never by name. Only Indian (INR) NSE/BSE listings qualify, NSE preferred; two
+    distinct symbols on the deciding exchange are `ambiguous`, not guessed. Resolved mappings are
+    permanent; `not_found`/`ambiguous` are retried after 7 days; transient failures are not cached.
+  - Prices: `/price` per listing, cached in `market_prices`. A price younger than
+    `MARKET_PRICE_TTL_MINUTES` (5-15, default 10) is served without a request; forced refresh
+    has a 60-second floor; a failed refresh serves the last price as `stale` with its timestamp
+    (no age limit), otherwise `unavailable`. Requests are capped per rolling minute
+    (`TWELVE_DATA_CREDITS_PER_MINUTE`, default 8 = free plan); excess requests are deferred.
+  - Every result has a status (`fresh`, `stale`, `unavailable`, `not_supported`) and, when not
+    fresh, an issue code; Twelve Data messages, URLs and headers never leave the client.
+    Mutual funds are `not_supported` (no Twelve Data call).
+  - `TWELVE_DATA_API_KEY` lives only in `backend/.env`; it is optional (prices then report
+    `not_configured`), sent only in the `Authorization` header, and never logged or returned.
+    Tests run offline with the key blanked; the live check is opt-in:
+    `RUN_LIVE_TWELVE_DATA=1 TWELVE_DATA_LIVE_SYMBOL=<ticker> TWELVE_DATA_LIVE_ISIN=<isin>
+    .venv/bin/pytest -m live_twelve_data -s tests/test_twelve_data_live.py`
 - **Sample broker files** live in the git-ignored `sample_data/` folder as private reference
   fixtures. Tests that use them skip when they are absent; all other adapter tests generate
   small synthetic `.xlsx` files, so a fresh clone has a fully runnable test suite.
