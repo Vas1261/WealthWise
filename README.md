@@ -74,7 +74,9 @@ npm run dev                                    # http://localhost:5173
     else the workbook is rejected. Only one sheet is read; sheets are never merged.
   - The statement date comes only from the selected sheet's title (strict `YYYY-MM-DD`);
     never from the file name, file dates, `Previous Closing Price`, or transaction dates.
-    A missing, invalid, or duplicated title rejects the workbook rather than guessing.
+    A sheet whose title is missing, invalid, or duplicated does not qualify; non-qualifying
+    sheets never affect another sheet. Two qualifying sheets of the selected kind are
+    rejected as ambiguous, and a workbook with no qualifying sheet is rejected.
   - On `Combined`, a row's `Instrument Type` must be `-` (equity); any other value,
     including blank, is reported as an unsupported-instrument-type row error, never
     imported as equity. Instruments are not classified by ISIN prefix (ETFs carry `INF`
