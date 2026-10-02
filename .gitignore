@@ -1,0 +1,36 @@
+# Secrets / environment
+.env
+.env.*
+!.env.example
+
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Node / frontend
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Personal / sample broker data (contains PII — never commit)
+*.xlsx
+*.xls
+*.csv
+sample_data/
+dataset/
+uploads/
+
+# OS / editor
+.DS_Store
+~$*
+.vscode/
+.idea/
