@@ -8,6 +8,7 @@ PyJWT==2.15.1
 bcrypt==5.0.0
 openpyxl==3.1.5
 httpx2==2.13.1
+python-multipart==0.0.32
 
 # dev / test
 pytest==9.1.1

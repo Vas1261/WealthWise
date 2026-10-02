@@ -105,6 +105,43 @@ npm run dev                                    # http://localhost:5173
     Tests run offline with the key blanked; the live check is opt-in:
     `RUN_LIVE_TWELVE_DATA=1 TWELVE_DATA_LIVE_SYMBOL=<ticker> TWELVE_DATA_LIVE_ISIN=<isin>
     .venv/bin/pytest -m live_twelve_data -s tests/test_twelve_data_live.py`
+- **Import persistence and Portfolio Engine (Module 7).**
+  - `services/import_service.import_statement(db, user_id, file, name)` picks the adapter by
+    content (`can_parse`), parses, and stores an `ImportBatch` + `Holding` rows for the
+    authenticated user. Snapshot identity is user + broker + asset class + statement date: the
+    same identity is replaced; a newer statement becomes current; an older one is kept as history
+    but never current; an import with row errors and no valid rows is not stored at all. A valid
+    but empty statement (e.g. every fund redeemed) is a real, current, empty snapshot. Only the base
+    file name is stored.
+  - Import history is separate from snapshots: `import_attempts` records every attempt with its
+    result at import time - `current`, `history` (older than the current statement), `failed` (row
+    errors, no valid rows; never a snapshot) or `rejected` (unsupported, ambiguous or invalid file) -
+    plus file name, broker/asset class/statement date where known, row counts and whether it
+    replaced the same snapshot. `import_batches` holds only successful snapshots; a replaced
+    snapshot's attempt keeps its history row (its `batch_id` becomes NULL).
+  - `POST /api/imports` (session auth + CSRF, multipart field `file`, one `.xlsx` up to 5 MB): 201
+    with the result for stored imports; 422 with the result and row errors for a failed import;
+    422 `{detail, code}` for `unsupported_statement` / `ambiguous_statement` / `invalid_statement`;
+    415 `not_xlsx`; 413 `file_too_large`. The upload is streamed to a private temporary file that is
+    always deleted. Responses never include paths, holdings or cell values.
+  - Effective holdings: the user's latest snapshot per (broker, asset class), user-filtered in both
+    the snapshot selection and the result. Positions stay per broker even for the same ISIN.
+  - Valuation (`domain/portfolio.py`, pure Decimal, no internal rounding):
+    `invested = quantity x average_buy_price`; a price is usable only if Module 6 says fresh/stale,
+    a price exists and its currency is the holding's; then `current = quantity x price`,
+    `pnl = current - invested`, `pnl% = pnl / invested x 100` (none when invested is 0). Otherwise
+    current value and P&L stay empty, never zero or cost. Mutual funds are never priced; they show
+    a labelled `cost_floor_value` (their cost), never part of current value. Stale prices count but
+    flag the totals and expose the oldest price time.
+  - Totals are per currency (never summed across currencies): invested, priced invested, current,
+    P&L (against priced cost only), unpriced cost, fund cost floor, status counts, oldest price.
+    `reporting_totals` is filled only when every holding is in the user's reporting currency;
+    otherwise `fx_required` (Module 8). Breakdowns by asset class and broker.
+  - `holdings` enforce `quantity > 0` and `average_buy_price >= 0` (migration 0004); invalid stored
+    data yields a controlled 409, before any market request.
+  - API: `GET /api/portfolio`, `POST /api/portfolio/refresh` (CSRF; forces a price refresh within
+    Module 6's 60 s floor). User from the session only. One Market Service call per request, equities
+    only. Numbers are strings: money 2 dp, P&L % 2 dp, prices 4 dp (half-even), quantities as stored.
 - **Sample broker files** live in the git-ignored `sample_data/` folder as private reference
   fixtures. Tests that use them skip when they are absent; all other adapter tests generate
   small synthetic `.xlsx` files, so a fresh clone has a fully runnable test suite.

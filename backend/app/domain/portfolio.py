@@ -1,0 +1,232 @@
+"""Portfolio valuation and aggregation as pure functions (no database, HTTP, framework or file access).
+
+Rules (Module 7, spec 4.3):
+- invested_value = quantity x average_buy_price, always.
+- A price is usable only when Module 6 reports FRESH or STALE, a price exists, and its currency is
+  the holding's native currency. Then current_value = quantity x price,
+  unrealized_pnl = current_value - invested_value, and
+  unrealized_pnl_pct = unrealized_pnl / invested_value x 100 (None when invested_value is 0).
+- Without a usable price nothing is filled in: current value and P&L stay None.
+- Totals are kept per currency and never summed across currencies. Totals P&L compares priced
+  current value with the cost of the priced holdings only.
+- Mutual funds expose cost_floor_value (= invested value): a labelled floor, never a market value
+  and never part of current_value.
+- No rounding: arithmetic runs in a high-precision context so products and sums of stored values
+  (Numeric(20,6)) are exact; presentation rounds.
+"""
+
+from collections import defaultdict
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
+from datetime import date, datetime
+from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
+
+from app.domain.holdings import ASSET_CLASS_MUTUAL_FUND
+from app.domain.market import PriceIssue, PriceResult, PriceStatus
+
+# 60 significant digits keep products of two Numeric(20,6) values (at most 40 digits) and their sums
+# exact; only the percentage division can ever round.
+CALCULATION_CONTEXT = Context(prec=60, rounding=ROUND_HALF_EVEN)
+HUNDRED = Decimal(100)
+ZERO = Decimal(0)
+
+USABLE_PRICE_STATUSES = (PriceStatus.FRESH, PriceStatus.STALE)
+
+
+class InvalidPositionError(ValueError):
+    """A persisted holding violates the import invariants (never silently corrected or dropped)."""
+
+    def __init__(self, holding_id: int, reason: str) -> None:
+        super().__init__(f"Holding {holding_id} is invalid: {reason}")
+        self.holding_id = holding_id
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class HoldingPosition:
+    """One effective holding as persisted (mirrors NormalizedHolding plus snapshot information)."""
+
+    holding_id: int
+    instrument_name: str
+    isin: str | None
+    symbol: str | None
+    asset_class: str
+    source_broker: str
+    native_currency: str
+    quantity: Decimal
+    average_buy_price: Decimal
+    statement_date: date
+    import_batch_id: str
+
+
+@dataclass(frozen=True)
+class Money:
+    amount: Decimal
+    currency: str
+
+
+@dataclass(frozen=True)
+class HoldingValuation:
+    position: HoldingPosition
+    price: PriceResult  # the Module 6 result, unchanged (status, issue, as_of)
+    currency_mismatch: bool  # a price exists but in another currency than the holding
+    invested_value: Money
+    current_price: Decimal | None
+    current_value: Money | None
+    unrealized_pnl: Money | None
+    unrealized_pnl_pct: Decimal | None
+    cost_floor_value: Money | None  # mutual funds only: the cost basis as a labelled floor
+
+    @property
+    def priced(self) -> bool:
+        return self.current_value is not None
+
+    @property
+    def stale(self) -> bool:
+        return self.priced and self.price.status == PriceStatus.STALE
+
+
+@dataclass(frozen=True)
+class CurrencyTotals:
+    currency: str
+    invested_value: Decimal
+    priced_invested_value: Decimal
+    current_value: Decimal | None
+    unrealized_pnl: Decimal | None
+    unrealized_pnl_pct: Decimal | None
+    unpriced_invested_value: Decimal
+    cost_floor_value: Decimal  # sum over mutual funds; never part of current_value
+    holdings: int
+    priced: int
+    stale: int
+    unavailable: int
+    not_supported: int
+    currency_mismatch: int
+    not_configured: int
+    oldest_price_as_of: datetime | None
+
+    @property
+    def contains_stale_prices(self) -> bool:
+        return self.stale > 0
+
+
+@dataclass(frozen=True)
+class PortfolioSummary:
+    holdings: list[HoldingValuation]
+    totals_by_currency: dict[str, CurrencyTotals]
+    by_asset_class: dict[str, dict[str, CurrencyTotals]]  # asset class -> currency -> totals
+    by_broker: dict[str, dict[str, CurrencyTotals]]  # broker -> currency -> totals
+    reporting_currency: str
+    reporting_totals: CurrencyTotals | None  # only when every holding is in the reporting currency
+    fx_required: bool  # holdings in another currency than the reporting currency (Module 8)
+
+    @property
+    def contains_stale_prices(self) -> bool:
+        return any(t.contains_stale_prices for t in self.totals_by_currency.values())
+
+    @property
+    def oldest_price_as_of(self) -> datetime | None:
+        return _oldest(t.oldest_price_as_of for t in self.totals_by_currency.values())
+
+
+def validate_position(position: HoldingPosition) -> None:
+    if position.quantity <= 0:
+        raise InvalidPositionError(position.holding_id, "quantity must be greater than zero")
+    if position.average_buy_price < 0:
+        raise InvalidPositionError(position.holding_id, "average buy price must not be negative")
+
+
+def value_holding(position: HoldingPosition, price: PriceResult) -> HoldingValuation:
+    validate_position(position)
+    currency = position.native_currency
+    has_price = price.status in USABLE_PRICE_STATUSES and price.price is not None
+    currency_mismatch = has_price and price.currency != currency
+    current_price: Decimal | None = None
+    current: Decimal | None = None
+    pnl: Decimal | None = None
+    pct: Decimal | None = None
+    with localcontext(CALCULATION_CONTEXT):
+        invested = position.quantity * position.average_buy_price
+        if has_price and not currency_mismatch and price.price is not None:
+            current_price = price.price
+            current = position.quantity * current_price
+            pnl = current - invested
+            pct = pnl / invested * HUNDRED if invested != ZERO else None
+    is_fund = position.asset_class == ASSET_CLASS_MUTUAL_FUND
+    return HoldingValuation(
+        position=position,
+        price=price,
+        currency_mismatch=currency_mismatch,
+        invested_value=Money(invested, currency),
+        current_price=current_price,
+        current_value=Money(current, currency) if current is not None else None,
+        unrealized_pnl=Money(pnl, currency) if pnl is not None else None,
+        unrealized_pnl_pct=pct,
+        cost_floor_value=Money(invested, currency) if is_fund else None,
+    )
+
+
+def currency_totals(currency: str, valuations: Sequence[HoldingValuation]) -> CurrencyTotals:
+    """Totals for holdings in one currency (raises if given another currency: never mixed)."""
+    if any(v.invested_value.currency != currency for v in valuations):
+        raise ValueError(f"currency_totals({currency}) received holdings in another currency")
+    priced = [v for v in valuations if v.priced]
+    with localcontext(CALCULATION_CONTEXT):
+        invested = sum((v.invested_value.amount for v in valuations), ZERO)
+        priced_invested = sum((v.invested_value.amount for v in priced), ZERO)
+        current = sum((v.current_value.amount for v in priced if v.current_value), ZERO) if priced else None
+        pnl = current - priced_invested if current is not None else None
+        pct = pnl / priced_invested * HUNDRED if pnl is not None and priced_invested != ZERO else None
+        unpriced_invested = invested - priced_invested
+        cost_floor = sum((v.cost_floor_value.amount for v in valuations if v.cost_floor_value), ZERO)
+    return CurrencyTotals(
+        currency=currency,
+        invested_value=invested,
+        priced_invested_value=priced_invested,
+        current_value=current,
+        unrealized_pnl=pnl,
+        unrealized_pnl_pct=pct,
+        unpriced_invested_value=unpriced_invested,
+        cost_floor_value=cost_floor,
+        holdings=len(valuations),
+        priced=len(priced),
+        stale=sum(v.stale for v in valuations),
+        unavailable=sum(not v.priced and v.price.status != PriceStatus.NOT_SUPPORTED for v in valuations),
+        not_supported=sum(v.price.status == PriceStatus.NOT_SUPPORTED for v in valuations),
+        currency_mismatch=sum(v.currency_mismatch for v in valuations),
+        not_configured=sum(v.price.issue == PriceIssue.NOT_CONFIGURED for v in valuations),
+        oldest_price_as_of=_oldest(v.price.as_of for v in priced),
+    )
+
+
+def summarize(valuations: Sequence[HoldingValuation], reporting_currency: str) -> PortfolioSummary:
+    by_currency = _totals_by(valuations, lambda v: "all")["all"] if valuations else {}
+    currencies = set(by_currency)
+    single_reporting_currency = bool(currencies) and currencies == {reporting_currency}
+    return PortfolioSummary(
+        holdings=list(valuations),
+        totals_by_currency=by_currency,
+        by_asset_class=_totals_by(valuations, lambda v: v.position.asset_class),
+        by_broker=_totals_by(valuations, lambda v: v.position.source_broker),
+        reporting_currency=reporting_currency,
+        reporting_totals=by_currency[reporting_currency] if single_reporting_currency else None,
+        fx_required=bool(currencies - {reporting_currency}),
+    )
+
+
+def _totals_by(
+    valuations: Iterable[HoldingValuation], key: Callable[[HoldingValuation], str]
+) -> dict[str, dict[str, CurrencyTotals]]:
+    """group -> currency -> totals, preserving first-appearance order."""
+    groups: dict[str, dict[str, list[HoldingValuation]]] = defaultdict(lambda: defaultdict(list))
+    for valuation in valuations:
+        groups[key(valuation)][valuation.invested_value.currency].append(valuation)
+    return {
+        group: {currency: currency_totals(currency, items) for currency, items in by_currency.items()}
+        for group, by_currency in groups.items()
+    }
+
+
+def _oldest(timestamps: Iterable[datetime | None]) -> datetime | None:
+    present = [t for t in timestamps if t is not None]
+    return min(present) if present else None
