@@ -4,6 +4,8 @@ Orchestration only: the repository selects the effective holdings, Module 6's Ma
 supplies prices (one get_prices call per request, equities only; it resolves and prices each ISIN
 once and applies its cache and request budget), and the domain does every calculation.
 Mutual funds are never sent for pricing; they carry Module 6's own NOT_SUPPORTED result.
+Top-level totals are converted into the user's reporting currency with Module 8 FX rates (cached;
+a forced price refresh does not force FX). FX never fills in a missing or mismatched market price.
 """
 
 from sqlalchemy.orm import Session
@@ -13,7 +15,7 @@ from app.domain.market import PriceIssue, PriceResult, PriceStatus
 from app.domain.portfolio import InvalidPositionError, PortfolioSummary, summarize, validate_position, value_holding
 from app.models import User
 from app.repositories import portfolio_repository
-from app.services import market_service
+from app.services import fx_service, market_service
 from app.services.market_service import InstrumentRef
 
 MUTUAL_FUND_PRICE = PriceResult(PriceStatus.NOT_SUPPORTED, issue=PriceIssue.MUTUAL_FUND)
@@ -50,4 +52,6 @@ def get_portfolio(db: Session, user: User, *, force_refresh: bool = False) -> Po
         value_holding(p, MUTUAL_FUND_PRICE if p.asset_class == ASSET_CLASS_MUTUAL_FUND else prices[p.holding_id])
         for p in positions
     ]
-    return summarize(valuations, user.reporting_currency)
+    currencies = [v.invested_value.currency for v in valuations]
+    fx_rates = fx_service.get_rates(currencies, user.reporting_currency) if currencies else {}
+    return summarize(valuations, user.reporting_currency, fx_rates)

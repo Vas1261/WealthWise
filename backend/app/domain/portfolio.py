@@ -13,14 +13,21 @@ Rules (Module 7, spec 4.3):
   and never part of current_value.
 - No rounding: arithmetic runs in a high-precision context so products and sums of stored values
   (Numeric(20,6)) are exact; presentation rounds.
+
+Reporting currency (Module 8, spec 2.7): only the top-level per-currency totals are converted, each
+multiplied by its rate into the reporting currency (holdings and breakdowns stay native). Converted
+P&L compares converted priced current value with converted priced cost, both at today's rate (no
+separate FX gain/loss). The mutual-fund cost floor is converted separately and never joins current
+value. If any needed rate is unusable there is no converted total at all (never a partial one).
 """
 
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
 
+from app.domain.fx import FxRate, FxStatus, identity_rate
 from app.domain.holdings import ASSET_CLASS_MUTUAL_FUND
 from app.domain.market import PriceIssue, PriceResult, PriceStatus
 
@@ -111,14 +118,43 @@ class CurrencyTotals:
 
 
 @dataclass(frozen=True)
+class ReportingTotals:
+    """Top-level totals converted into the reporting currency (Module 8)."""
+
+    currency: str
+    invested_value: Decimal
+    priced_invested_value: Decimal
+    current_value: Decimal | None
+    unrealized_pnl: Decimal | None
+    unrealized_pnl_pct: Decimal | None
+    unpriced_invested_value: Decimal
+    cost_floor_value: Decimal  # converted mutual-fund cost floor; never part of current_value
+    holdings: int
+    priced: int
+    stale: int
+    unavailable: int
+    not_supported: int
+    currency_mismatch: int
+    not_configured: int
+    contains_stale_prices: bool
+    oldest_price_as_of: datetime | None
+    fx_rates: dict[str, FxRate]  # native currency -> rate into the reporting currency
+
+    @property
+    def fx_stale(self) -> bool:
+        return any(rate.status == FxStatus.STALE for rate in self.fx_rates.values())
+
+
+@dataclass(frozen=True)
 class PortfolioSummary:
     holdings: list[HoldingValuation]
     totals_by_currency: dict[str, CurrencyTotals]
     by_asset_class: dict[str, dict[str, CurrencyTotals]]  # asset class -> currency -> totals
     by_broker: dict[str, dict[str, CurrencyTotals]]  # broker -> currency -> totals
     reporting_currency: str
-    reporting_totals: CurrencyTotals | None  # only when every holding is in the reporting currency
-    fx_required: bool  # holdings in another currency than the reporting currency (Module 8)
+    reporting_totals: ReportingTotals | None  # None when there are no holdings or a needed rate is unusable
+    fx_required: bool  # holdings in another currency than the reporting currency
+    fx_unavailable: list[str]  # native currencies whose rate into the reporting currency is unusable
 
     @property
     def contains_stale_prices(self) -> bool:
@@ -199,19 +235,98 @@ def currency_totals(currency: str, valuations: Sequence[HoldingValuation]) -> Cu
     )
 
 
-def summarize(valuations: Sequence[HoldingValuation], reporting_currency: str) -> PortfolioSummary:
+def summarize(
+    valuations: Sequence[HoldingValuation],
+    reporting_currency: str,
+    fx_rates: Mapping[str, FxRate] | None = None,
+) -> PortfolioSummary:
+    """fx_rates: native currency -> rate into reporting_currency. The reporting currency itself always
+    converts at exactly 1; any other currency without a usable rate leaves reporting_totals None."""
     by_currency = _totals_by(valuations, lambda v: "all")["all"] if valuations else {}
     currencies = set(by_currency)
-    single_reporting_currency = bool(currencies) and currencies == {reporting_currency}
+    reporting_totals, fx_unavailable = convert_totals(by_currency, fx_rates or {}, reporting_currency)
     return PortfolioSummary(
         holdings=list(valuations),
         totals_by_currency=by_currency,
         by_asset_class=_totals_by(valuations, lambda v: v.position.asset_class),
         by_broker=_totals_by(valuations, lambda v: v.position.source_broker),
         reporting_currency=reporting_currency,
-        reporting_totals=by_currency[reporting_currency] if single_reporting_currency else None,
+        reporting_totals=reporting_totals,
         fx_required=bool(currencies - {reporting_currency}),
+        fx_unavailable=fx_unavailable,
     )
+
+
+def convert_totals(
+    totals_by_currency: Mapping[str, CurrencyTotals], fx_rates: Mapping[str, FxRate], reporting_currency: str
+) -> tuple[ReportingTotals | None, list[str]]:
+    """Convert top-level per-currency totals into the reporting currency; (None, missing) if any rate is unusable."""
+    if not totals_by_currency:
+        return None, []
+    rates = {reporting_currency: identity_rate(reporting_currency), **fx_rates}
+    unavailable = sorted(
+        currency
+        for currency in totals_by_currency
+        if currency not in rates
+        or not rates[currency].usable
+        or (rates[currency].base, rates[currency].quote) != (currency, reporting_currency)
+    )
+    if unavailable:
+        return None, unavailable
+
+    def converted(field: Callable[[CurrencyTotals], Decimal]) -> Decimal:
+        return sum(
+            (field(t) * _rate(rates[c]) for c, t in totals_by_currency.items()), ZERO
+        )
+
+    totals = list(totals_by_currency.values())
+    with localcontext(CALCULATION_CONTEXT):
+        invested = converted(lambda t: t.invested_value)
+        priced_invested = converted(lambda t: t.priced_invested_value)
+        priced_buckets = [(c, t) for c, t in totals_by_currency.items() if t.current_value is not None]
+        current = (
+            sum((_amount(t.current_value) * _rate(rates[c]) for c, t in priced_buckets), ZERO)
+            if priced_buckets else None
+        )
+        pnl = current - priced_invested if current is not None else None
+        pct = pnl / priced_invested * HUNDRED if pnl is not None and priced_invested != ZERO else None
+        unpriced = converted(lambda t: t.unpriced_invested_value)
+        cost_floor = converted(lambda t: t.cost_floor_value)
+    return (
+        ReportingTotals(
+            currency=reporting_currency,
+            invested_value=invested,
+            priced_invested_value=priced_invested,
+            current_value=current,
+            unrealized_pnl=pnl,
+            unrealized_pnl_pct=pct,
+            unpriced_invested_value=unpriced,
+            cost_floor_value=cost_floor,
+            holdings=sum(t.holdings for t in totals),
+            priced=sum(t.priced for t in totals),
+            stale=sum(t.stale for t in totals),
+            unavailable=sum(t.unavailable for t in totals),
+            not_supported=sum(t.not_supported for t in totals),
+            currency_mismatch=sum(t.currency_mismatch for t in totals),
+            not_configured=sum(t.not_configured for t in totals),
+            contains_stale_prices=any(t.contains_stale_prices for t in totals),
+            oldest_price_as_of=_oldest(t.oldest_price_as_of for t in totals),
+            fx_rates={c: rates[c] for c in totals_by_currency},
+        ),
+        [],
+    )
+
+
+def _rate(rate: FxRate) -> Decimal:
+    if rate.rate is None:  # unreachable: only usable rates get here
+        raise ValueError("unusable FX rate")
+    return rate.rate
+
+
+def _amount(value: Decimal | None) -> Decimal:
+    if value is None:  # unreachable: only priced buckets get here
+        raise ValueError("missing amount")
+    return value
 
 
 def _totals_by(

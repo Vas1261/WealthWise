@@ -1,4 +1,5 @@
 import secrets
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -10,7 +11,7 @@ from app.core.config import settings
 from app.core.database import get_session
 from app.domain.auth import ACCESS_TOKEN_LIFETIME, REFRESH_TOKEN_LIFETIME, PasswordPolicyError
 from app.models import User
-from app.services import auth_service
+from app.services import auth_service, user_service
 from app.services.auth_service import AuthContext, IssuedTokens
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -27,6 +28,12 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str
+
+
+class ProfileUpdate(BaseModel):
+    """Only the reporting currency can be changed; any other field (e.g. user_id) is ignored."""
+
+    reporting_currency: str
 
 
 class UserOut(BaseModel):
@@ -117,3 +124,27 @@ def logout(response: Response, context: AuthContext = Depends(get_auth_context),
 @router.get("/me", response_model=UserOut)
 def me(user: User = Depends(get_current_user)) -> User:
     return user
+
+
+@router.patch("/me", response_model=UserOut)
+def update_me(
+    body: ProfileUpdate,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_session)],
+) -> User | JSONResponse:
+    """Set the authenticated user's reporting currency (CSRF-protected by the global middleware)."""
+    try:
+        return user_service.set_reporting_currency(db, user, body.reporting_currency)
+    except user_service.InvalidCurrencyCode:
+        return _problem(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_currency",
+                        "Use a three-letter upper-case ISO currency code, e.g. INR")
+    except user_service.UnsupportedCurrency:
+        return _problem(status.HTTP_422_UNPROCESSABLE_CONTENT, "unsupported_currency",
+                        "This currency is not supported for conversion")
+    except user_service.CurrencyValidationUnavailable:
+        return _problem(status.HTTP_503_SERVICE_UNAVAILABLE, "currency_validation_unavailable",
+                        "Currencies cannot be verified right now; please try again later")
+
+
+def _problem(status_code: int, code: str, detail: str) -> JSONResponse:
+    return JSONResponse({"detail": detail, "code": code}, status_code=status_code)

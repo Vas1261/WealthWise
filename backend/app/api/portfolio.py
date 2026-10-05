@@ -1,7 +1,7 @@
 """Portfolio routes. The user always comes from the session cookie (never from request data).
 
 Presentation rounding happens only here, after every total is computed: money 2 dp, P&L % 2 dp,
-prices 4 dp (ROUND_HALF_EVEN), quantities as stored. Numbers are serialised as strings so clients
+prices 4 dp, FX rates 6 dp (ROUND_HALF_EVEN), quantities as stored. Numbers are serialised as strings so clients
 never see binary floating point.
 """
 
@@ -15,7 +15,8 @@ from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user
 from app.core.database import get_session
-from app.domain.portfolio import CurrencyTotals, HoldingValuation, Money, PortfolioSummary
+from app.domain.fx import FxRate
+from app.domain.portfolio import CurrencyTotals, HoldingValuation, Money, PortfolioSummary, ReportingTotals
 from app.models import User
 from app.services import portfolio_service
 
@@ -27,6 +28,7 @@ DbSession = Annotated[Session, Depends(get_session)]
 MONEY_PLACES = 2
 PERCENT_PLACES = 2
 PRICE_PLACES = 4
+RATE_PLACES = 6
 _FORMAT_CONTEXT = Context(prec=60, rounding=ROUND_HALF_EVEN)
 
 
@@ -54,6 +56,19 @@ class TotalsOut(BaseModel):
     oldest_price_as_of: datetime | None
 
 
+class FxRateOut(BaseModel):
+    currency: str  # the native currency converted from
+    rate: str | None  # units of the reporting currency per one unit of `currency`
+    rate_date: date | None
+    status: str  # identity | fresh | stale | unavailable
+    issue: str | None
+
+
+class ReportingTotalsOut(TotalsOut):
+    fx_rates: list[FxRateOut]
+    fx_stale: bool
+
+
 class HoldingOut(BaseModel):
     holding_id: int
     instrument_name: str
@@ -79,8 +94,9 @@ class HoldingOut(BaseModel):
 
 class PortfolioOut(BaseModel):
     reporting_currency: str
-    reporting_totals: TotalsOut | None
+    reporting_totals: ReportingTotalsOut | None
     fx_required: bool
+    fx_unavailable: list[str]
     contains_stale_prices: bool
     oldest_price_as_of: datetime | None
     totals_by_currency: dict[str, TotalsOut]
@@ -120,6 +136,37 @@ def _totals(t: CurrencyTotals) -> TotalsOut:
     )
 
 
+def _fx_rate(currency: str, rate: FxRate) -> FxRateOut:
+    return FxRateOut(
+        currency=currency,
+        rate=_fixed(rate.rate, RATE_PLACES),
+        rate_date=rate.rate_date,
+        status=rate.status.value,
+        issue=rate.issue.value if rate.issue else None,
+    )
+
+
+def _reporting(t: ReportingTotals) -> ReportingTotalsOut:
+    return ReportingTotalsOut(
+        currency=t.currency,
+        invested_value=_money(t.invested_value) or "",
+        priced_invested_value=_money(t.priced_invested_value) or "",
+        current_value=_money(t.current_value),
+        unrealized_pnl=_money(t.unrealized_pnl),
+        unrealized_pnl_pct=_fixed(t.unrealized_pnl_pct, PERCENT_PLACES),
+        unpriced_invested_value=_money(t.unpriced_invested_value) or "",
+        cost_floor_value=_money(t.cost_floor_value) or "",
+        counts=StatusCountsOut(
+            holdings=t.holdings, priced=t.priced, stale=t.stale, unavailable=t.unavailable,
+            not_supported=t.not_supported, currency_mismatch=t.currency_mismatch, not_configured=t.not_configured,
+        ),
+        contains_stale_prices=t.contains_stale_prices,
+        oldest_price_as_of=t.oldest_price_as_of,
+        fx_rates=[_fx_rate(currency, rate) for currency, rate in t.fx_rates.items()],
+        fx_stale=t.fx_stale,
+    )
+
+
 def _holding(v: HoldingValuation) -> HoldingOut:
     p = v.position
     return HoldingOut(
@@ -149,8 +196,9 @@ def _holding(v: HoldingValuation) -> HoldingOut:
 def _portfolio(summary: PortfolioSummary) -> PortfolioOut:
     return PortfolioOut(
         reporting_currency=summary.reporting_currency,
-        reporting_totals=_totals(summary.reporting_totals) if summary.reporting_totals else None,
+        reporting_totals=_reporting(summary.reporting_totals) if summary.reporting_totals else None,
         fx_required=summary.fx_required,
+        fx_unavailable=summary.fx_unavailable,
         contains_stale_prices=summary.contains_stale_prices,
         oldest_price_as_of=summary.oldest_price_as_of,
         totals_by_currency={c: _totals(t) for c, t in summary.totals_by_currency.items()},

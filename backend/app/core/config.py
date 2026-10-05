@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     # Requests allowed per rolling minute, matching the plan's credit limit (free Basic plan: 8).
     twelve_data_credits_per_minute: int = Field(default=8, ge=1)
 
+    # Frankfurter FX rates (Module 8). No API key exists or is needed.
+    fx_enabled: bool = True
+    frankfurter_base_url: str = "https://api.frankfurter.dev"
+    fx_cache_ttl_minutes: int = Field(default=60, ge=1)
+
 
 def check_app_settings(s: Settings) -> None:
     """Fail fast at API startup on missing or unsafe security configuration."""

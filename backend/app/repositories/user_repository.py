@@ -17,3 +17,9 @@ def create(db: Session, email: str, password_hash: str) -> User:
     db.add(user)
     db.flush()
     return user
+
+
+def set_reporting_currency(db: Session, user: User, currency: str) -> User:
+    user.reporting_currency = currency
+    db.flush()
+    return user

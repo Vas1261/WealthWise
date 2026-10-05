@@ -64,8 +64,9 @@ def test_refresh_forces_and_get_does_not(alice, market):
 def test_empty_portfolio_response(alice, market):
     body = alice.get("/api/portfolio").json()
     assert body == {
-        "reporting_currency": "INR", "reporting_totals": None, "fx_required": False, "contains_stale_prices": False,
-        "oldest_price_as_of": None, "totals_by_currency": {}, "by_asset_class": {}, "by_broker": {}, "holdings": [],
+        "reporting_currency": "INR", "reporting_totals": None, "fx_required": False, "fx_unavailable": [],
+        "contains_stale_prices": False, "oldest_price_as_of": None, "totals_by_currency": {}, "by_asset_class": {},
+        "by_broker": {}, "holdings": [],
     }
 
 
@@ -99,7 +100,11 @@ def test_serialisation_rounding_and_strings(alice, market):
     assert totals["current_value"] == "120.37" and totals["cost_floor_value"] == "0.12"
     assert totals["counts"] == {"holdings": 2, "priced": 1, "stale": 0, "unavailable": 0, "not_supported": 1,
                                 "currency_mismatch": 0, "not_configured": 0}
-    assert body["reporting_totals"] == totals and body["fx_required"] is False
+    reporting = body["reporting_totals"]
+    assert {k: v for k, v in reporting.items() if k not in ("fx_rates", "fx_stale")} == totals
+    assert reporting["fx_rates"] == [
+        {"currency": "INR", "rate": "1.000000", "rate_date": None, "status": "identity", "issue": None}]
+    assert (reporting["fx_stale"], body["fx_required"], body["fx_unavailable"]) == (False, False, [])
 
     def numbers_are_strings(node):
         if isinstance(node, dict):

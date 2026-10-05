@@ -170,11 +170,18 @@ def test_currencies_are_never_summed_together():
     assert (summary.reporting_totals, summary.fx_required) == (None, True)
 
 
-def test_reporting_totals_only_when_every_holding_is_in_reporting_currency():
+def test_reporting_totals_in_reporting_currency_need_no_fx_rate():
     inr = summarize([value_holding(position(), fresh("110"))], reporting_currency="INR")
-    assert inr.reporting_totals is inr.totals_by_currency["INR"] and inr.fx_required is False
+    native, reporting = inr.totals_by_currency["INR"], inr.reporting_totals
+    assert (reporting.currency, reporting.invested_value, reporting.current_value, reporting.unrealized_pnl) == (
+        "INR", native.invested_value, native.current_value, native.unrealized_pnl)
+    assert reporting.fx_rates["INR"].rate == Decimal("1") and (inr.fx_required, inr.fx_unavailable) == (False, [])
+
+
+def test_other_reporting_currency_without_rate_has_no_converted_totals():
     eur_user = summarize([value_holding(position(), fresh("110"))], reporting_currency="EUR")
-    assert (eur_user.reporting_totals, eur_user.fx_required) == (None, True)
+    assert (eur_user.reporting_totals, eur_user.fx_required, eur_user.fx_unavailable) == (None, True, ["INR"])
+    assert eur_user.totals_by_currency["INR"].current_value == Decimal("1100")  # native totals stay available
 
 
 def test_empty_portfolio():

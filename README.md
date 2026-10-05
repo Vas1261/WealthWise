@@ -142,6 +142,27 @@ npm run dev                                    # http://localhost:5173
   - API: `GET /api/portfolio`, `POST /api/portfolio/refresh` (CSRF; forces a price refresh within
     Module 6's 60 s floor). User from the session only. One Market Service call per request, equities
     only. Numbers are strings: money 2 dp, P&L % 2 dp, prices 4 dp (half-even), quantities as stored.
+- **Currency service (Module 8, decisions F1-F8).** `services/fx_service.py` gets live rates from
+  Frankfurter v2 (`GET /v2/rate/{base}/{quote}`, no API key) through `integrations/frankfurter.py`
+  (10 s timeout, rates parsed straight to Decimal, fixed error messages, upstream text never leaked).
+  - Same-currency conversion is exactly `Decimal("1")` with no request. Each (base, quote) pair is
+    cached in the process for `FX_CACHE_TTL_MINUTES` (60) and requested in the needed direction (no
+    locally derived inverses). A failed refresh serves the last good rate as `stale` (no age limit
+    within the process); with nothing cached the rate is `unavailable`. `FX_ENABLED=false` makes no
+    requests. The cache is per process and lost on restart (no table, no migration).
+  - Only top-level portfolio totals are converted into the user's reporting currency (holdings and
+    broker/asset-class breakdowns stay native). `reporting_totals` adds `fx_rates` (rate, date,
+    status, issue) and `fx_stale`; if any needed rate is unusable, `reporting_totals` is null and
+    `fx_unavailable` lists the currencies, never a partial total. Converted P&L uses today's rate for
+    cost and value (spec 2.7; no separate FX gain/loss). The fund cost floor is converted separately
+    and never joins current value; FX never fills a missing or mismatched market price.
+    `POST /api/portfolio/refresh` does not force FX.
+  - `PATCH /api/auth/me {"reporting_currency": "EUR"}` (session + CSRF) changes only the user's
+    reporting currency: three upper-case letters, supported by Frankfurter (`/v2/currencies`, cached
+    24 h); 422 `invalid_currency` / `unsupported_currency`, or 503 `currency_validation_unavailable`
+    when Frankfurter cannot be reached (nothing unverified is stored). Default stays INR.
+  - Tests run offline (`FX_ENABLED=false`); the live check is opt-in:
+    `RUN_LIVE_FRANKFURTER=1 .venv/bin/pytest -m live_frankfurter -s tests/test_frankfurter_live.py`
 - **Sample broker files** live in the git-ignored `sample_data/` folder as private reference
   fixtures. Tests that use them skip when they are absent; all other adapter tests generate
   small synthetic `.xlsx` files, so a fresh clone has a fully runnable test suite.

@@ -19,6 +19,10 @@ os.environ["COOKIE_SECURE"] = "false"
 LIVE_TWELVE_DATA = os.environ.get("RUN_LIVE_TWELVE_DATA") == "1"
 if not LIVE_TWELVE_DATA:
     os.environ["TWELVE_DATA_API_KEY"] = ""
+# Frankfurter needs no key, so disable FX outright unless an explicit live run asks for it.
+LIVE_FRANKFURTER = os.environ.get("RUN_LIVE_FRANKFURTER") == "1"
+if not LIVE_FRANKFURTER:
+    os.environ["FX_ENABLED"] = "false"
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -27,6 +31,7 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "live_twelve_data: calls the real Twelve Data API; needs RUN_LIVE_TWELVE_DATA=1 and a key"
     )
+    config.addinivalue_line("markers", "live_frankfurter: calls the real Frankfurter API; needs RUN_LIVE_FRANKFURTER=1")
 
 
 @pytest.fixture
@@ -45,6 +50,16 @@ def _reenable_app_loggers() -> None:
 @pytest.fixture(autouse=True)
 def _loggers_enabled():
     _reenable_app_loggers()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_fx_cache():
+    # The FX cache lives in the process; never let one test's rates leak into another.
+    from app.services import fx_service
+
+    fx_service.clear_cache()
+    yield
+    fx_service.clear_cache()
 
 
 @pytest.fixture

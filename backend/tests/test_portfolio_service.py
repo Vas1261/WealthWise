@@ -123,7 +123,10 @@ def test_totals_and_breakdowns(user, market):
     assert inr.current_value == Decimal("1200") + Decimal("750") + Decimal("480")
     assert inr.unrealized_pnl == inr.current_value - Decimal("2360")
     assert inr.cost_floor_value == Decimal("1000") and inr.unpriced_invested_value == Decimal("1000")
-    assert summary.reporting_totals is inr and summary.fx_required is False
+    reporting = summary.reporting_totals
+    assert (reporting.invested_value, reporting.current_value) == (inr.invested_value, inr.current_value)
+    assert (reporting.unrealized_pnl, reporting.cost_floor_value) == (inr.unrealized_pnl, inr.cost_floor_value)
+    assert reporting.fx_rates["INR"].status == "identity" and summary.fx_required is False
     assert set(summary.by_broker) == {"zerodha", "groww"} and set(summary.by_asset_class) == {"equity", "mutual_fund"}
 
 
@@ -156,8 +159,10 @@ def test_reporting_currency_other_than_holdings_requires_fx(market):
         seed(db, eur_user.id, "zerodha", "equity", D1, [nh()])
     market.prices = {"INE000D01019": fresh("110")}
     summary = portfolio(eur_user)
+    # FX is disabled in offline tests: no rate, so no converted total and INR is reported as unavailable
     assert (summary.reporting_currency, summary.reporting_totals, summary.fx_required) == ("EUR", None, True)
-    assert summary.totals_by_currency["INR"].current_value == Decimal("1100")  # native total, never converted
+    assert summary.fx_unavailable == ["INR"]
+    assert summary.totals_by_currency["INR"].current_value == Decimal("1100")  # native total stays available
 
 
 # --- Invalid persisted data ------------------------------------------------------------------------
