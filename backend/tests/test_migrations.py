@@ -11,6 +11,7 @@ from app.models import Holding, ImportBatch, User
 
 EXPECTED_TABLES = {
     "users", "import_batches", "import_attempts", "holdings", "sessions", "instrument_symbols", "market_prices",
+    "finance_entries", "budgets",
 }
 
 
@@ -26,6 +27,15 @@ def test_downgrade_upgrade_round_trip(alembic_config):
     command.upgrade(alembic_config, "head")
     command.downgrade(alembic_config, "base")
     assert table_names() == set()
+    command.upgrade(alembic_config, "head")
+    assert table_names() == EXPECTED_TABLES
+    command.downgrade(alembic_config, "base")
+
+
+def test_finance_migration_downgrades_to_0005_alone(alembic_config):
+    command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, "0005")
+    assert table_names() == EXPECTED_TABLES - {"finance_entries", "budgets"}
     command.upgrade(alembic_config, "head")
     assert table_names() == EXPECTED_TABLES
     command.downgrade(alembic_config, "base")

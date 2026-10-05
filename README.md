@@ -163,6 +163,36 @@ npm run dev                                    # http://localhost:5173
     when Frankfurter cannot be reached (nothing unverified is stored). Default stays INR.
   - Tests run offline (`FX_ENABLED=false`); the live check is opt-in:
     `RUN_LIVE_FRANKFURTER=1 .venv/bin/pytest -m live_frankfurter -s tests/test_frankfurter_live.py`
+- **Personal Finance (Module 9, decisions P1-P15).** `domain/finance.py` (pure Decimal rules),
+  `repositories/finance_repository.py`, `services/finance_service.py`, `api/finance.py`; tables
+  `finance_entries` and `budgets` (migration 0006). Backend only; the finance UI is Module 10.
+  - Entries: kind `income`/`expense`, category, amount, date (`YYYY-MM-DD`, 1900-9999, future allowed),
+    optional description (<= 255). Amounts are JSON strings, > 0, at most 2 decimals (up to the column's
+    18 whole digits); no floats, signs, exponents, NaN, whitespace or rounding. Money is stored exactly
+    (`ExactMoney` in `models/finance_entry.py`): `NUMERIC(20, 2)` on PostgreSQL, canonical decimal text
+    on SQLite (whose NUMERIC columns hold floats), always read back as `Decimal`; the CHECK compares
+    `CAST(amount AS NUMERIC) > 0` so it works on both. Categories are trimmed with internal whitespace
+    collapsed and matched exactly (case-sensitive, 1-50 characters, no category table).
+  - Currency: every entry and budget takes the user's reporting currency when it is created and keeps
+    it; the client never sends one and PUT never changes it, so changing the reporting currency never
+    reinterprets existing rows.
+  - Budgets: one per category per specific year-month (`YYYY-MM`), amount > 0, expenses only. The summary
+    compares each budget with that month's expenses in the same category and currency (`actual`,
+    `remaining`, `utilization_pct`, `over_budget`); other expenses are listed as `unbudgeted`.
+  - Cash position = income - expenses over all entries, per currency. Net worth = priced portfolio
+    current value (already in the reporting currency, Module 8) + cash converted at today's rate.
+    Unpriced holdings are left out (`complete=false`, `unpriced_holdings`); the mutual-fund
+    `cost_floor_value` is shown separately and never added. Any unusable FX rate gives a null total
+    (never a partial one) and lists the currency in `fx_unavailable`.
+  - API (`/api/finance`, session auth; POST/PUT/DELETE need CSRF): `POST/GET /entries` (filters `start`,
+    `end`, `kind`, `category`; newest first; no pagination), `GET/PUT/DELETE /entries/{id}` (PUT replaces
+    the whole entry), `POST /budgets`, `GET /budgets?month=`, `GET /budgets/summary?month=`,
+    `PUT /budgets/{id}` (amount only), `DELETE /budgets/{id}`, `GET /net-worth`. Another user's id is a
+    404. Money is strings at 2 dp. Errors are `{detail, code}` with fixed messages; schema errors on
+    finance routes omit FastAPI's echoed input. Finance values are never logged.
+  - The shared number formatter lives in `api/formatting.py` (moved unchanged from `api/portfolio.py`).
+  - Live demo (opt-in): `RUN_LIVE_FRANKFURTER=1 [RUN_LIVE_TWELVE_DATA=1 TWELVE_DATA_LIVE_ISIN=<isin>
+    TWELVE_DATA_LIVE_SYMBOL=<ticker>] .venv/bin/pytest -m live_frankfurter -s tests/test_finance_live.py`
 - **Sample broker files** live in the git-ignored `sample_data/` folder as private reference
   fixtures. Tests that use them skip when they are absent; all other adapter tests generate
   small synthetic `.xlsx` files, so a fresh clone has a fully runnable test suite.

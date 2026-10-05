@@ -6,7 +6,7 @@ never see binary floating point.
 """
 
 from datetime import date, datetime
-from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
+from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -14,6 +14,8 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user
+from app.api.formatting import MONEY_PLACES, PERCENT_PLACES, PRICE_PLACES, RATE_PLACES
+from app.api.formatting import fixed as _fixed
 from app.core.database import get_session
 from app.domain.fx import FxRate
 from app.domain.portfolio import CurrencyTotals, HoldingValuation, Money, PortfolioSummary, ReportingTotals
@@ -24,13 +26,6 @@ router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
 DbSession = Annotated[Session, Depends(get_session)]
-
-MONEY_PLACES = 2
-PERCENT_PLACES = 2
-PRICE_PLACES = 4
-RATE_PLACES = 6
-_FORMAT_CONTEXT = Context(prec=60, rounding=ROUND_HALF_EVEN)
-
 
 class StatusCountsOut(BaseModel):
     holdings: int
@@ -103,14 +98,6 @@ class PortfolioOut(BaseModel):
     by_asset_class: dict[str, dict[str, TotalsOut]]
     by_broker: dict[str, dict[str, TotalsOut]]
     holdings: list[HoldingOut]
-
-
-def _fixed(value: Decimal | None, places: int) -> str | None:
-    if value is None:
-        return None
-    with localcontext(_FORMAT_CONTEXT):
-        rounded = value.quantize(Decimal(1).scaleb(-places))
-    return str(rounded.copy_abs() if rounded.is_zero() else rounded)  # never "-0.00"
 
 
 def _money(value: Money | Decimal | None) -> str | None:
