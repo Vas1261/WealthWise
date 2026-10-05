@@ -193,6 +193,28 @@ npm run dev                                    # http://localhost:5173
   - The shared number formatter lives in `api/formatting.py` (moved unchanged from `api/portfolio.py`).
   - Live demo (opt-in): `RUN_LIVE_FRANKFURTER=1 [RUN_LIVE_TWELVE_DATA=1 TWELVE_DATA_LIVE_ISIN=<isin>
     TWELVE_DATA_LIVE_SYMBOL=<ticker>] .venv/bin/pytest -m live_frankfurter -s tests/test_finance_live.py`
+- **Dashboard and UI (Module 10, decisions U1-U9).** React app in `frontend/src`: a hash router
+  (`route.ts`, no router dependency) with six signed-in pages - Dashboard, Portfolio, Imports, Finance,
+  Budgets, Settings - behind the existing cookie session.
+  - `api.ts` keeps auth in HttpOnly cookies (only the CSRF cookie is read and echoed on writes), one
+    shared refresh then one retry on 401, and a session-ended signal that drops all in-memory data
+    and returns to login. JSON and FormData (upload) bodies; every request uses `cache: 'no-store'`;
+    error `code` and body are kept. Nothing is stored in localStorage/sessionStorage.
+  - The frontend never calculates: totals, P&L, percentages, remaining budget, cash, net worth, FX
+    and price freshness all come from the backend. Money strings are formatted with
+    `Intl.NumberFormat` directly from the string (exact for 18 + 2 digits), never via
+    `Number()`/`parseFloat()`; `guard.test.ts` enforces this. Numbers use the browser locale.
+  - A missing value shows as "—" or an explanation, never 0. Mutual funds show "price unavailable:
+    shown at average buy price (floor)" with the cost floor in its own column, never added to current
+    value or net worth. Breakdowns stay in native currency. Stale prices, stale/unavailable FX,
+    unpriced holdings and currency mismatches are spelled out in text, not colour alone.
+  - Amounts and other inputs are sent exactly as typed; the backend validates. Deletes use the
+    native `confirm()`. The dashboard's budget summary is the browser-local current month.
+  - `GET /api/imports` (session auth, read-only) returns the user's import history newest first:
+    attempt id, result at import time, broker, asset class, statement date, file name, row counts,
+    `replaced_existing`, `imported_at`. No paths, batch ids, holdings or row errors.
+  - Tests: `cd frontend && npm test` (Vitest + jsdom + Testing Library, fake API, synthetic data);
+    `npx tsc -b`, `npm run lint` (oxlint), `npm run build`.
 - **Sample broker files** live in the git-ignored `sample_data/` folder as private reference
   fixtures. Tests that use them skip when they are absent; all other adapter tests generate
   small synthetic `.xlsx` files, so a fresh clone has a fully runnable test suite.

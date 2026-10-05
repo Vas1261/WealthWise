@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TypeVar
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -152,8 +153,9 @@ def _price(
         except _MarketDataIssue as error:
             issue = error.issue
         else:
-            saved = market_repository.save_price(db, symbol, mic_code, price, mapping.currency or INR, now)
-            db.commit()
+            saved = _save_and_commit(
+                db, lambda: market_repository.save_price(db, symbol, mic_code, price, mapping.currency or INR, now)
+            )
             return _from_cache(saved, PriceStatus.FRESH)
 
     logger.warning("Twelve Data price refresh failed for %s on %s: %s", symbol, mic_code, issue.value)
@@ -192,8 +194,7 @@ def _resolve(
     resolved = next((c for c in choices if c.status == SymbolStatus.RESOLVED), None)
     ambiguous = next((c for c in choices if c.status == SymbolStatus.AMBIGUOUS), None)
     choice = resolved or ambiguous or SymbolChoice(SymbolStatus.NOT_FOUND)
-    saved = market_repository.save_symbol_mapping(db, isin, choice, now)
-    db.commit()
+    saved = _save_and_commit(db, lambda: market_repository.save_symbol_mapping(db, isin, choice, now))
     return saved
 
 
@@ -211,6 +212,20 @@ def _search(
         logger.warning("Twelve Data symbol search failed: %s", error.issue.value)
         return error.issue
     return choose_candidate(candidates, ticker=ticker)
+
+
+def _save_and_commit(db: Session, save: Callable[[], T]) -> T:
+    """Write a cache row and commit. Concurrent requests (e.g. the dashboard's parallel net-worth and portfolio
+    loads) can both find no row and both insert it; the loser hits the unique constraint. Then the row exists,
+    so roll back and save once more, which updates it with this request's equally fresh values."""
+    try:
+        saved = save()
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        saved = save()
+        db.commit()
+    return saved
 
 
 def _call(budget: RequestBudget, now: datetime, request: Callable[[], T]) -> T:

@@ -1,26 +1,350 @@
 :root {
   font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   color-scheme: light dark;
+  --border: #8885;
+  --muted: #8a8a8a;
+  --ok: #1f7a4d;
+  --warn: #9a6200;
+  --bad: #c2312f;
+  --info: #2f5fa8;
+  --focus: #2f6fdb;
+  line-height: 1.45;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ok: #5fcf95;
+    --warn: #f0b04a;
+    --bad: #ff7b72;
+    --info: #79a8ff;
+    --focus: #79a8ff;
+  }
 }
 
 body {
   margin: 0;
-  padding: 2rem;
+  padding: 1rem;
 }
 
 main {
+  max-width: 72rem;
+  margin: 0 auto;
+}
+
+main.signed-out {
   max-width: 28rem;
 }
 
-.card {
-  border: 1px solid #8884;
-  border-radius: 8px;
-  padding: 1rem 1.5rem;
+main:focus,
+h1:focus {
+  outline: none;
 }
 
+/* Visible keyboard focus everywhere. */
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.skip-link {
+  position: absolute;
+  left: -999px;
+}
+
+.skip-link:focus {
+  left: 1rem;
+  top: 1rem;
+  padding: 0.5rem 1rem;
+  background: Canvas;
+  z-index: 1;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Header and navigation */
+.app-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1.5rem;
+  max-width: 72rem;
+  margin: 0 auto 1rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  margin: 0;
+  font-weight: 700;
+  font-size: 1.2rem;
+}
+
+nav ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+nav a {
+  color: inherit;
+  text-decoration: none;
+  padding: 0.25rem 0;
+  border-bottom: 2px solid transparent;
+}
+
+nav a[aria-current='page'] {
+  font-weight: 700;
+  border-bottom-color: currentColor;
+}
+
+.account {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-left: auto;
+}
+
+footer {
+  max-width: 72rem;
+  margin: 2rem auto 0;
+}
+
+/* Layout */
+.dashboard {
+  display: grid;
+  gap: 1rem;
+}
+
+@media (min-width: 768px) {
+  .dashboard {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .dashboard .wide {
+    grid-column: 1 / -1;
+  }
+}
+
+section {
+  margin-bottom: 1.5rem;
+}
+
+.card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+  min-width: 0;
+}
+
+.card h2 {
+  margin-top: 0;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  margin: 0.5rem 0;
+}
+
+/* Figures */
+.headline {
+  font-size: 2rem;
+  font-weight: 700;
+  margin: 0.25rem 0 0.75rem;
+}
+
+.figures {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: 0.75rem 1.5rem;
+  margin: 0 0 0.75rem;
+}
+
+.figures dt {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.figures dd {
+  margin: 0;
+  font-weight: 600;
+}
+
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.negative {
+  color: var(--bad);
+}
+
+/* Tables */
+.table-scroll {
+  overflow-x: auto;
+  margin: 0.5rem 0 1rem;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+caption {
+  text-align: left;
+  font-weight: 600;
+  padding: 0.25rem 0;
+}
+
+th,
+td {
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+thead th {
+  font-size: 0.85rem;
+}
+
+th.num,
+td.num {
+  text-align: right;
+}
+
+tbody th {
+  font-weight: 500;
+}
+
+.sub {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.sub-inline {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.actions {
+  white-space: nowrap;
+}
+
+.actions button + button {
+  margin-left: 0.5rem;
+}
+
+meter {
+  width: 6rem;
+  vertical-align: middle;
+}
+
+/* Status: text first, colour only reinforces it */
+.badge {
+  display: inline-block;
+  padding: 0.05rem 0.5rem;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 0.85rem;
+}
+
+.badge.ok,
+.notice.ok { color: var(--ok); }
+.badge.warn,
+.notice.warn { color: var(--warn); }
+.badge.bad,
+.notice.bad,
+.notice.error { color: var(--bad); }
+.badge.info,
+.notice.info { color: var(--info); }
+
+.notice {
+  border-left: 4px solid currentColor;
+  padding: 0.4rem 0.75rem;
+  margin: 0.5rem 0;
+  color: var(--ok);
+}
+
+.notice p {
+  margin: 0.25rem 0;
+}
+
+.notice table,
+.notice caption {
+  color: CanvasText;
+}
+
+.empty,
+.muted {
+  color: var(--muted);
+}
+
+.error,
+.field-error {
+  color: var(--bad);
+}
+
+.field-error {
+  margin: -0.5rem 0 0;
+  font-size: 0.9rem;
+}
+
+/* Forms */
 form {
   display: grid;
   gap: 0.75rem;
+}
+
+.inline-form {
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  align-items: end;
+  margin-bottom: 1rem;
+}
+
+.inline-form h3 {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.inline-form .toolbar,
+.inline-form .field-error,
+.inline-form > p {
+  grid-column: 1 / -1;
+}
+
+.row-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: end;
+  justify-content: flex-end;
+}
+
+.row-form label {
+  text-align: left;
+}
+
+fieldset {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: flex;
+  gap: 1rem;
 }
 
 label {
@@ -28,15 +352,35 @@ label {
   gap: 0.25rem;
 }
 
-input {
+label.choice {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.month-picker {
+  max-width: 14rem;
+  margin-bottom: 1rem;
+}
+
+input,
+select {
   font: inherit;
   padding: 0.4rem;
+}
+
+input[aria-invalid='true'] {
+  border: 2px solid var(--bad);
 }
 
 button {
   font: inherit;
   padding: 0.4rem 0.8rem;
   cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
 }
 
 button.link {
@@ -53,10 +397,6 @@ button.link {
   opacity: 0.75;
 }
 
-.error {
-  color: #d33;
-}
-
-.notice {
-  color: #2a7;
+details {
+  margin: 0.5rem 0;
 }

@@ -255,3 +255,63 @@ def test_statement_date_in_history_matches_statement(alice, tmp_path):
     with SessionLocal() as db:
         (attempt,) = import_repository.list_attempts(db, user_id_of(alice))
     assert attempt.statement_date == date(2026, 5, 31)
+
+
+# --- GET /api/imports: import history (Module 10) -----------------------------------------------------
+
+HISTORY_FIELDS = {"attempt_id", "result", "broker", "asset_class", "statement_date", "file_name", "rows_succeeded",
+                  "rows_failed", "replaced_existing", "imported_at"}
+
+
+def test_history_requires_authentication():
+    assert TestClient(app).get("/api/imports").status_code == 401
+
+
+def test_history_is_empty_for_a_new_user(alice):
+    response = alice.get("/api/imports")
+    assert (response.status_code, response.json()) == (200, [])
+
+
+def test_history_lists_every_result_newest_first(alice, tmp_path):
+    first = upload(alice, groww_equity_file(tmp_path / "g.xlsx"), name="first.xlsx")
+    upload(alice, groww_equity_file(tmp_path / "g.xlsx"), name="again.xlsx")  # same identity: replaces
+    upload(alice, groww_equity_file(tmp_path / "old.xlsx", as_on="01-08-2026"), name="older.xlsx")
+    upload(alice, groww_equity_file(tmp_path / "bad.xlsx", as_on="02-09-2026", rows=[BAD_ROW]), name="bad.xlsx")
+    upload(alice, write_xlsx(tmp_path / "x.xlsx", {"Sheet1": [["Quarterly report"], ["Revenue", 1]]}),
+           name="other.xlsx")
+    assert first.status_code == 201
+
+    body = alice.get("/api/imports").json()
+    assert all(set(row) == HISTORY_FIELDS for row in body)
+    assert [(r["file_name"], r["result"], r["replaced_existing"]) for r in body] == [
+        ("other.xlsx", "rejected", False), ("bad.xlsx", "failed", False), ("older.xlsx", "history", False),
+        ("again.xlsx", "current", True), ("first.xlsx", "current", False),
+    ]
+    assert [r["attempt_id"] for r in body] == sorted((r["attempt_id"] for r in body), reverse=True)
+    rejected, failed, *_ = body
+    assert (rejected["broker"], rejected["asset_class"], rejected["statement_date"]) == (None, None, None)
+    assert (failed["broker"], failed["rows_succeeded"], failed["rows_failed"]) == ("groww", 0, 1)
+    assert body[-1]["statement_date"] and body[-1]["imported_at"].endswith(("Z", "+00:00"))
+
+
+def test_history_is_scoped_to_the_user(alice, tmp_path):
+    upload(alice, groww_equity_file(tmp_path / "g.xlsx"), name="alice.xlsx")
+    bob = logged_in_client("bob@example.com")
+    upload(bob, zerodha_file(tmp_path / "z.xlsx"), name="bob.xlsx")
+    assert [r["file_name"] for r in alice.get("/api/imports").json()] == ["alice.xlsx"]
+    assert [r["file_name"] for r in bob.get("/api/imports").json()] == ["bob.xlsx"]
+
+
+def test_history_exposes_no_paths_batches_holdings_or_row_errors(alice, tmp_path):
+    upload(alice, groww_equity_file(tmp_path / "bad.xlsx", rows=[BAD_ROW]), name=str(tmp_path / "nested" / "bad.xlsx"))
+    upload(alice, groww_equity_file(tmp_path / "g.xlsx"))
+    text = alice.get("/api/imports").text
+    for forbidden in (str(tmp_path), "batch", "holdings", "errors", "NOT-AN-ISIN", "BROKEN LTD", "INE"):
+        assert forbidden not in text
+
+
+def test_history_read_needs_no_csrf_and_changes_nothing(alice, tmp_path):
+    upload(alice, groww_equity_file(tmp_path / "g.xlsx"))
+    before = (history(user_id_of(alice)), effective(user_id_of(alice)))
+    assert alice.get("/api/imports", headers={}).status_code == 200
+    assert (history(user_id_of(alice)), effective(user_id_of(alice))) == before

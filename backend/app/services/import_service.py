@@ -139,6 +139,11 @@ def import_statement(db: Session, user_id: int, file_path: str, file_name: str) 
     return replace(outcome, attempt_id=attempt.id)
 
 
+def list_history(db: Session, user_id: int) -> list[ImportAttempt]:
+    """The user's import attempts, newest first (read-only; Module 10 import history)."""
+    return list(reversed(import_repository.list_attempts(db, user_id)))
+
+
 def safe_file_name(file_name: str | None) -> str:
     """Only the base name of a client-supplied file name; never a path (splits on both / and \\)."""
     return PureWindowsPath(file_name or "").name[:MAX_FILE_NAME_LENGTH]

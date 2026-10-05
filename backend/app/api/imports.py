@@ -11,11 +11,14 @@ Status codes:
 - 422 with the import result: "failed" (row errors, no valid rows); nothing replaced
 - 422 {"detail", "code"}: unsupported_statement | ambiguous_statement | invalid_statement
 - 415 {"detail", "code": "not_xlsx"}; 413 {"detail", "code": "file_too_large"}
+
+GET /api/imports (Module 10): the user's import history, newest first, one row per attempt with its result
+at import time. Only the history fields: no paths, batch ids, holdings or row errors.
 """
 
 import os
 import tempfile
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, UploadFile, status
@@ -56,6 +59,19 @@ class ImportOut(BaseModel):
     rows_failed: int
     replaced_existing: bool
     errors: list[RowErrorOut]
+
+
+class AttemptOut(BaseModel):
+    attempt_id: int
+    result: str  # "current" | "history" | "failed" | "rejected" (at import time)
+    broker: str | None  # None when the file was not a recognised statement
+    asset_class: str | None
+    statement_date: date | None
+    file_name: str  # base name only
+    rows_succeeded: int
+    rows_failed: int
+    replaced_existing: bool
+    imported_at: datetime
 
 
 class _UploadTooLarge(Exception):
@@ -126,3 +142,21 @@ def import_statement(
     if outcome.result == ImportResult.FAILED:
         return JSONResponse(body.model_dump(mode="json"), status_code=status.HTTP_422_UNPROCESSABLE_CONTENT)
     return body
+
+
+def _utc(value: datetime) -> datetime:
+    # SQLite drops tzinfo on read; stored timestamps are UTC (same rule as market_repository).
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+@router.get("", response_model=list[AttemptOut])
+def import_history(user: CurrentUser, db: DbSession) -> list[AttemptOut]:
+    """The authenticated user's import attempts, newest first (attempt ids only grow)."""
+    return [
+        AttemptOut(
+            attempt_id=a.id, result=a.result, broker=a.broker, asset_class=a.asset_class,
+            statement_date=a.statement_date, file_name=a.file_name, rows_succeeded=a.rows_succeeded,
+            rows_failed=a.rows_failed, replaced_existing=a.replaced_existing, imported_at=_utc(a.imported_at),
+        )
+        for a in import_service.list_history(db, user.id)
+    ]
