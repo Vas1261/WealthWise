@@ -1,6 +1,6 @@
 """Seed one account with all three real (private, git-ignored) statements and value it (spec 5, step 7).
 
-Offline: the Twelve Data key is blank in tests, so equities are valued as UNAVAILABLE / NOT_CONFIGURED
+Offline: the Upstox token is blank in tests, so equities are valued as UNAVAILABLE / NOT_CONFIGURED
 and funds as NOT_SUPPORTED; what is verified is persistence, snapshot selection and cost totals.
 Assertions report only counts or booleans, never names, ISINs or amounts.
 """

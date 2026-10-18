@@ -7,6 +7,10 @@
   process); with nothing cached the result is UNAVAILABLE with an FxIssue. Rates are never invented.
 - With FX_ENABLED=false no request is made (DISABLED).
 The cache lives in this process only: it is lost on restart and not shared between processes.
+
+Pinned historical rates (FR-20) are different: the rate of a past date is fetched once (one range
+request per currency pair for all missing dates) and stored in the database for good, so a value
+converted at it never changes. A date without its own rate (weekend, holiday) takes the latest earlier one.
 """
 
 import logging
@@ -17,9 +21,22 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import TypeVar
 
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
 from app.core.config import settings
-from app.domain.fx import FxIssue, FxRate, FxStatus, identity_rate, is_currency_code, is_fresh
+from app.domain.fx import (
+    HISTORY_LOOKBACK,
+    FxIssue,
+    FxRate,
+    FxStatus,
+    identity_rate,
+    is_currency_code,
+    is_fresh,
+    rates_on_or_before,
+)
 from app.integrations.frankfurter import FrankfurterClient, FrankfurterError
+from app.repositories import fx_rate_repository
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +62,7 @@ class _CachedRate:
 _rates: dict[tuple[str, str], _CachedRate] = {}
 _currencies: tuple[datetime, frozenset[str]] | None = None
 _lock = threading.Lock()
+_history_lock = threading.Lock()  # one historical fetch at a time, so concurrent views share the stored rows
 
 
 def clear_cache() -> None:
@@ -69,6 +87,61 @@ def get_rates(
 
 def get_rate(base: str, quote: str, *, client: FrankfurterClient | None = None, now: datetime | None = None) -> FxRate:
     return get_rates([base], quote, client=client, now=now)[base]
+
+
+def get_historical_rates(
+    db: Session,
+    base: str,
+    quote: str,
+    dates: Iterable[date],
+    *,
+    client: FrankfurterClient | None = None,
+    now: datetime | None = None,
+) -> dict[date, FxRate]:
+    """The pinned rate from `base` into `quote` for each date (HISTORICAL), fetching and storing missing ones."""
+    wanted = sorted(set(dates))
+    if not (is_currency_code(base) and is_currency_code(quote)):
+        return {d: FxRate(base, quote, FxStatus.UNAVAILABLE, issue=FxIssue.INVALID_CURRENCY) for d in wanted}
+    if base == quote:
+        return {d: identity_rate(base) for d in wanted}
+    now = now or datetime.now(UTC)
+    with _history_lock:
+        stored = fx_rate_repository.get_pinned(db, base, quote, wanted)
+        missing = [d for d in wanted if d not in stored]
+        issue = FxIssue.NO_RATE_FOR_DATE
+        if missing:
+            try:
+                found = _run(client, lambda c: _fetch_history(c, base, quote, missing, now))
+            except FrankfurterError as error:
+                logger.warning("Historical FX fetch failed for %s/%s: %s", base, quote, error.issue.value)
+                issue = error.issue
+            else:
+                if found is None:
+                    issue = FxIssue.DISABLED
+                elif found:
+                    try:
+                        fx_rate_repository.save_pinned(db, base, quote, found, now)
+                        db.commit()
+                    except IntegrityError:  # another process pinned some of them first: keep theirs
+                        db.rollback()
+                    stored = fx_rate_repository.get_pinned(db, base, quote, wanted)
+    return {
+        d: FxRate(base, quote, FxStatus.HISTORICAL, rate=row.rate, rate_date=row.rate_date, fetched_at=row.fetched_at)
+        if (row := stored.get(d)) is not None
+        else FxRate(base, quote, FxStatus.UNAVAILABLE, issue=issue)
+        for d in wanted
+    }
+
+
+def _fetch_history(
+    client: FrankfurterClient | None, base: str, quote: str, dates: list[date], now: datetime
+) -> dict[date, tuple[Decimal, date]] | None:
+    """Rates for the given dates from one range request; None when FX is disabled."""
+    if client is None:
+        return None
+    end = min(max(dates), now.date())
+    series = client.rates_between(base, quote, min(dates) - HISTORY_LOOKBACK, end)
+    return rates_on_or_before(series, dates)
 
 
 def supported_currencies(*, client: FrankfurterClient | None = None, now: datetime | None = None) -> frozenset[str]:

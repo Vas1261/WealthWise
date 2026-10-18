@@ -35,7 +35,11 @@ describe('budgets', () => {
     expect(within(travel).getByText(formatMoney('-50.00', 'INR')).className).toContain('negative')
     const meter = within(travel).getByRole('meter', { name: 'Travel: budget used' })
     expect(meter.getAttribute('value')).toBe('150.00') // the backend's string, unconverted
+    // Over budget: the full bar lies above `high`, the range browsers draw as bad (not as the "good" green).
+    expect([meter.getAttribute('optimum'), meter.getAttribute('low'), meter.getAttribute('high')]).toEqual(['0', '1', '99'])
     expect(within(rows[0]).getByText('Within budget')).toBeTruthy()
+    const within100 = within(rows[0]).getByRole('meter', { name: 'Food: budget used' })
+    expect([within100.getAttribute('optimum'), within100.getAttribute('low'), within100.getAttribute('high')]).toEqual(['0', '100', '100'])
     const unbudgeted = screen.getByRole('table', { name: /spending without a budget/i })
     expect(within(unbudgeted).getByText('Gifts')).toBeTruthy()
     expect(api.apiCalls().every((c) => c.method === 'GET')).toBe(true)
@@ -151,5 +155,27 @@ describe('budgets', () => {
     render(<BudgetsPage />)
     await userEvent.click(await screen.findByRole('button', { name: 'Retry' }))
     expect(await screen.findByRole('table', { name: /budget vs actual/i })).toBeTruthy()
+  })
+
+  it('downloads the monthly report of the selected month and shows a failed download', async () => {
+    at(new Date(2026, 9, 5))
+    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: vi.fn(() => 'blob:x'), revokeObjectURL: vi.fn() }))
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    const api = fakeApi({
+      'GET /api/finance/budgets?month=2026-10': { body: [] },
+      'GET /api/finance/budgets/summary?month=2026-10': { body: summaryData({ budgets: [], unbudgeted: [] }) },
+      'GET /api/reports/monthly': [
+        new Response('csv', { headers: { 'Content-Disposition': 'attachment; filename="wealthwise-monthly-2026-10.csv"' } }),
+        { status: 503, body: { detail: 'Service unavailable' } },
+      ],
+    })
+    render(<BudgetsPage />)
+    const group = screen.getByRole('group', { name: 'Monthly report for October 2026' })
+    await userEvent.click(within(group).getByRole('button', { name: 'Download CSV' }))
+    expect(api.apiCalls().at(-1)?.url).toBe('/api/reports/monthly?month=2026-10&format=csv')
+    expect(click).toHaveBeenCalledTimes(1)
+    await userEvent.click(within(group).getByRole('button', { name: 'Download PDF' }))
+    expect(await within(group).findByRole('alert')).toBeTruthy()
+    expect(api.apiCalls().at(-1)?.url).toBe('/api/reports/monthly?month=2026-10&format=pdf')
   })
 })

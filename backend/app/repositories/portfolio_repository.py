@@ -1,8 +1,9 @@
 """User-scoped read of the effective holdings (SQLAlchemy only; no calculations)."""
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
+from app.domain.holdings import CostDate
 from app.domain.portfolio import HoldingPosition
 from app.models import Holding, ImportBatch
 
@@ -26,6 +27,7 @@ def get_effective_positions(db: Session, user_id: int) -> list[HoldingPosition]:
     )
     rows = db.execute(
         select(Holding, ImportBatch.statement_date)
+        .options(selectinload(Holding.cost_dates))
         .join(ImportBatch, Holding.import_batch_id == ImportBatch.id)
         .join(
             latest,
@@ -49,6 +51,7 @@ def get_effective_positions(db: Session, user_id: int) -> list[HoldingPosition]:
             average_buy_price=holding.average_buy_price,
             statement_date=statement_date,
             import_batch_id=holding.import_batch_id,
+            cost_dates=tuple(CostDate(d.on_date, d.amount) for d in holding.cost_dates),
         )
         for holding, statement_date in rows
     ]

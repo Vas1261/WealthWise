@@ -119,6 +119,18 @@ def test_other_users_rows_behave_as_not_found(alice, bob):
     assert alice.get(f"/api/finance/entries/{entry['id']}").json()["amount"] == "1499.50"
 
 
+@pytest.mark.parametrize(("method", "path", "body"), [
+    ("GET", "/api/finance/entries/{id}", None), ("PUT", "/api/finance/entries/{id}", ENTRY),
+    ("DELETE", "/api/finance/entries/{id}", None), ("PUT", "/api/finance/budgets/{id}", {"amount": "1"}),
+    ("DELETE", "/api/finance/budgets/{id}", None),
+])
+def test_ids_beyond_the_database_integer_range_are_refused_not_a_server_error(alice, method, path, body):
+    too_big = send(alice, method, path.format(id=2**63), body)  # cannot be bound to a query at all
+    assert (too_big.status_code, too_big.json()["code"]) == (422, "invalid_request")
+    largest = send(alice, method, path.format(id=2**63 - 1), body)  # a valid id that simply does not exist
+    assert largest.status_code == 404
+
+
 def test_user_id_and_currency_in_the_body_are_ignored(alice, bob):
     bob_id = user_id_of(bob)
     entry = create(alice, user_id=bob_id, currency="USD")

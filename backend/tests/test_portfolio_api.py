@@ -65,7 +65,7 @@ def test_empty_portfolio_response(alice, market):
     body = alice.get("/api/portfolio").json()
     assert body == {
         "reporting_currency": "INR", "reporting_totals": None, "fx_required": False, "fx_unavailable": [],
-        "contains_stale_prices": False, "oldest_price_as_of": None, "totals_by_currency": {}, "by_asset_class": {},
+        "pinned_fx_unavailable": [], "contains_stale_prices": False, "oldest_price_as_of": None, "totals_by_currency": {}, "by_asset_class": {},
         "by_broker": {}, "holdings": [],
     }
 
@@ -91,6 +91,8 @@ def test_serialisation_rounding_and_strings(alice, market):
         "unrealized_pnl": "20.37",  # 20.370369
         "unrealized_pnl_pct": "20.37",  # 20.37037120...
         "cost_floor_value": None,
+        "pinned_fx_rate": "1.000000", "pinned_cost": "100.00",  # INR reporting: pinned at exactly 1
+        "cost_dates_from": "2026-07-31", "cost_dates_to": "2026-07-31", "cost_date_count": 1,
     }
     assert fund["invested_value"] == "0.12"  # 0.125 rounds half-even, never via float
     assert fund["cost_floor_value"] == "0.12" and fund["current_value"] is None
@@ -101,7 +103,9 @@ def test_serialisation_rounding_and_strings(alice, market):
     assert totals["counts"] == {"holdings": 2, "priced": 1, "stale": 0, "unavailable": 0, "not_supported": 1,
                                 "currency_mismatch": 0, "not_configured": 0}
     reporting = body["reporting_totals"]
-    assert {k: v for k, v in reporting.items() if k not in ("fx_rates", "fx_stale")} == totals
+    pinned = ("invested_value_pinned", "priced_invested_value_pinned", "currency_gain", "total_gain", "total_gain_pct")
+    assert {k: v for k, v in reporting.items() if k not in ("fx_rates", "fx_stale", *pinned)} == totals
+    assert [reporting[k] for k in pinned] == ["100.12", "100.00", "0.00", "20.37", "20.37"]
     assert reporting["fx_rates"] == [
         {"currency": "INR", "rate": "1.000000", "rate_date": None, "status": "identity", "issue": None}]
     assert (reporting["fx_stale"], body["fx_required"], body["fx_unavailable"]) == (False, False, [])

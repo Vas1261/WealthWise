@@ -1,0 +1,39 @@
+; Architecture rules checked by `.venv/bin/lint-imports` (also run by tests/test_architecture.py).
+
+[importlinter]
+root_package = app
+include_external_packages = True
+
+[importlinter:contract:business-layer-purity]
+name = Business layer has no framework, database or API-client dependencies (NFR-09)
+type = forbidden
+source_modules =
+    app.domain
+forbidden_modules =
+    app.api
+    app.services
+    app.repositories
+    app.integrations
+    app.adapters
+    app.models
+    app.core
+    fastapi
+    starlette
+    pydantic
+    pydantic_settings
+    sqlalchemy
+    alembic
+    httpx2
+    openpyxl
+    reportlab
+    jwt
+    bcrypt
+
+[importlinter:contract:layers]
+name = Each layer only uses the layers below it
+type = layers
+layers =
+    app.api
+    app.services
+    app.repositories | app.integrations | app.adapters
+    app.domain

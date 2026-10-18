@@ -11,9 +11,9 @@ backend/    FastAPI + SQLAlchemy + Alembic (Python 3.11)
   app/services/      Service: orchestration/sequencing only
   app/domain/        Business/Domain: pure functions, no DB/HTTP/framework imports
   app/adapters/      Broker file adapters (Adapter Pattern): read exports into NormalizedHolding, no DB access
-  app/integrations/  Clients for external APIs (Twelve Data), called only by services
+  app/integrations/  Clients for external APIs (Upstox, Frankfurter), called only by services
   app/repositories/  Repository: persistence via SQLAlchemy only (no raw SQL)
-  app/models/        ORM models (User, ImportBatch, Holding)
+  app/models/        ORM models (User, ImportBatch, Holding, HoldingCostDate, HistoricalFxRate, ...)
   app/core/          Settings and database session
   alembic/           Migrations
 frontend/   React + Vite + TypeScript
@@ -26,9 +26,11 @@ frontend/   React + Vite + TypeScript
 cd backend
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 cp .env.example .env   # then set JWT_SECRET (see the comment in the file)
-.venv/bin/alembic upgrade head
-.venv/bin/uvicorn app.main:app --reload        # http://127.0.0.1:8000/health
+.venv/bin/alembic upgrade head                 # again after every update that adds a migration
+.venv/bin/uvicorn app.main:app --reload --reload-dir app   # http://127.0.0.1:8000/health
 .venv/bin/pytest
+.venv/bin/lint-imports                         # architecture rules (.importlinter); also run by pytest
+RUN_PERFORMANCE=1 .venv/bin/pytest -m performance -s tests/test_performance.py   # NFR-01/NFR-02 timings
 
 # Frontend (proxies /api and /health to the backend)
 cd frontend
@@ -85,26 +87,28 @@ npm run dev                                    # http://localhost:5173
     the `Equity` fallback applies. The `Equity` sheet has no `Instrument Type` column.
   - Other columns (discrepant/long-term/pledged quantities, `Sector`, `Previous Closing
     Price`, P&L columns) are not read.
-- **Market data (Module 6, decisions M1-M14).** `services/market_service.py` resolves ISINs to
-  Twelve Data listings and serves cached live prices; it never invents a price and never uses a
-  broker file's closing price. Market data is public, so both caches are global (no user link).
-  - Symbol lookup: Twelve Data `/symbol_search` by ISIN first, then by the broker's own ticker
-    (Zerodha); never by name. Only Indian (INR) NSE/BSE listings qualify, NSE preferred; two
-    distinct symbols on the deciding exchange are `ambiguous`, not guessed. Resolved mappings are
-    permanent; `not_found`/`ambiguous` are retried after 7 days; transient failures are not cached.
-  - Prices: `/price` per listing, cached in `market_prices`. A price younger than
-    `MARKET_PRICE_TTL_MINUTES` (5-15, default 10) is served without a request; forced refresh
-    has a 60-second floor; a failed refresh serves the last price as `stale` with its timestamp
-    (no age limit), otherwise `unavailable`. Requests are capped per rolling minute
-    (`TWELVE_DATA_CREDITS_PER_MINUTE`, default 8 = free plan); excess requests are deferred.
+- **Market data (Module 6; provider changed from Twelve Data to Upstox).** `services/market_service.py`
+  serves cached live prices from Upstox through `integrations/upstox.py`; it never invents a price and
+  never uses a broker file's closing price. Market data is public, so the cache is global (no user link).
+  - Why Upstox: Twelve Data's free plan returns `not_entitled` for every NSE/BSE listing (it covers US
+    equities only). Upstox serves Indian prices free with a read-only Analytics Token (one year).
+  - No symbol lookup: Upstox addresses a listing as exchange segment + ISIN (`NSE_EQ|<ISIN>`,
+    `BSE_EQ|<ISIN>`), so each ISIN is asked for on both exchanges with `GET /v3/market-quote/ltp`, up to
+    500 keys (250 ISINs) per request: one request prices a whole portfolio. The NSE price is used when
+    there is one, else BSE; an ISIN on neither is `not_listed`. Never matched by name.
+  - Prices are cached per ISIN in `market_prices` with their exchange (migration 0007 replaced the
+    Twelve Data symbol and price caches). A price younger than `MARKET_PRICE_TTL_MINUTES` (5-15,
+    default 10) is served without a request; forced refresh has a 60-second floor; a failed refresh
+    serves the last price as `stale` with its timestamp (no age limit), otherwise `unavailable`.
+    Requests in one process take turns, so the dashboard's parallel net-worth and portfolio loads share
+    one price request.
   - Every result has a status (`fresh`, `stale`, `unavailable`, `not_supported`) and, when not
-    fresh, an issue code; Twelve Data messages, URLs and headers never leave the client.
-    Mutual funds are `not_supported` (no Twelve Data call).
-  - `TWELVE_DATA_API_KEY` lives only in `backend/.env`; it is optional (prices then report
-    `not_configured`), sent only in the `Authorization` header, and never logged or returned.
-    Tests run offline with the key blanked; the live check is opt-in:
-    `RUN_LIVE_TWELVE_DATA=1 TWELVE_DATA_LIVE_SYMBOL=<ticker> TWELVE_DATA_LIVE_ISIN=<isin>
-    .venv/bin/pytest -m live_twelve_data -s tests/test_twelve_data_live.py`
+    fresh, an issue code; Upstox messages, URLs and headers never leave the client.
+    Mutual funds are `not_supported` (no Upstox call).
+  - `UPSTOX_ANALYTICS_TOKEN` lives only in `backend/.env`; it is optional (prices then report
+    `not_configured`), sent only in the `Authorization: Bearer` header, and never logged or returned.
+    Tests run offline with the token blanked; the live check is opt-in:
+    `RUN_LIVE_UPSTOX=1 [UPSTOX_LIVE_ISIN=<isin>] .venv/bin/pytest -m live_upstox -s tests/test_upstox_live.py`
 - **Import persistence and Portfolio Engine (Module 7).**
   - `services/import_service.import_statement(db, user_id, file, name)` picks the adapter by
     content (`can_parse`), parses, and stores an `ImportBatch` + `Holding` rows for the
@@ -191,8 +195,8 @@ npm run dev                                    # http://localhost:5173
     404. Money is strings at 2 dp. Errors are `{detail, code}` with fixed messages; schema errors on
     finance routes omit FastAPI's echoed input. Finance values are never logged.
   - The shared number formatter lives in `api/formatting.py` (moved unchanged from `api/portfolio.py`).
-  - Live demo (opt-in): `RUN_LIVE_FRANKFURTER=1 [RUN_LIVE_TWELVE_DATA=1 TWELVE_DATA_LIVE_ISIN=<isin>
-    TWELVE_DATA_LIVE_SYMBOL=<ticker>] .venv/bin/pytest -m live_frankfurter -s tests/test_finance_live.py`
+  - Live demo (opt-in): `RUN_LIVE_FRANKFURTER=1 [RUN_LIVE_UPSTOX=1 UPSTOX_LIVE_ISIN=<isin>]
+    .venv/bin/pytest -m live_frankfurter -s tests/test_finance_live.py`
 - **Dashboard and UI (Module 10, decisions U1-U9).** React app in `frontend/src`: a hash router
   (`route.ts`, no router dependency) with six signed-in pages - Dashboard, Portfolio, Imports, Finance,
   Budgets, Settings - behind the existing cookie session.
@@ -215,6 +219,55 @@ npm run dev                                    # http://localhost:5173
     `replaced_existing`, `imported_at`. No paths, batch ids, holdings or row errors.
   - Tests: `cd frontend && npm test` (Vitest + jsdom + Testing Library, fake API, synthetic data);
     `npx tsc -b`, `npm run lint` (oxlint), `npm run build`.
+- **Pinned FX (FR-20, TC-05; migration 0008).** Every stored holding records the dates its cost was paid
+  on (`holding_cost_dates`, domain `CostDate`, amounts are weights). Groww mutual funds take one per
+  purchase date from the order history. A holdings statement shows no trades, so an equity carries its
+  dates over from the same ISIN in the previous statement of that broker (average-cost method: units
+  still held keep their dates, scaled to the cost they still carry; only cost added since then is dated to
+  the new statement; sales, bonus and split shares date nothing new). A holding stored without cost dates
+  is pinned at its statement date.
+  - The rate of each cost date into the reporting currency is fetched once (one Frankfurter
+    `GET /v2/rates?base=&quotes=&from=&to=` per currency pair), stored in `historical_fx_rates` and never
+    changed. A date without its own rate takes the latest earlier one (10-day look-back). Rates are pinned
+    right after an import (best effort) and otherwise when the portfolio is next viewed.
+  - The portfolio adds per holding `pinned_fx_rate` / `pinned_cost` (amount-weighted rate of its cost
+    dates) and, in `reporting_totals`, `invested_value_pinned`, `currency_gain` (priced cost at today's rate
+    minus at pinned rates) and `total_gain` = `unrealized_pnl` (market gain at today's rate) +
+    `currency_gain`. If any pinned rate is missing, every pinned figure is null and `pinned_fx_unavailable`
+    names the currency (never a partial figure). Holdings in the reporting currency pin at exactly 1.
+  - Frankfurter quotes INR->EUR to five decimals (e.g. 0.00947), the same precision the live conversion uses.
+- **Reports (FR-23, FR-24).** `GET /api/reports/monthly?month=YYYY-MM&format=pdf|csv` (income, expenses
+  and net per currency, totals per category, budget vs actual, the month's entries) and
+  `GET /api/reports/portfolio?format=pdf|csv` (reporting totals with the gain split, totals per currency,
+  every holding with valuation, P&L, price status and pinned cost). Session auth, attachments,
+  `Cache-Control: no-store`. CSV is UTF-8 with a BOM and plain numbers; typed or imported text starting
+  with `= + - @` is prefixed with `'` (CSV injection). PDFs are built with ReportLab (escaped text,
+  ISO currency codes because the built-in fonts have no rupee sign). Download buttons are on the Portfolio
+  and Budgets pages.
+- **Architecture rules (NFR-09).** `.importlinter` forbids `app.domain` from importing the framework,
+  database, HTTP clients or any outer layer, and keeps the layer order api -> services ->
+  repositories | integrations | adapters -> domain. `tests/test_architecture.py` runs it with the suite.
+- **Performance (NFR-01, NFR-02).** Measured by the opt-in `tests/test_performance.py` with in-memory
+  price/FX stand-ins. On the development container: dashboard data for 5,000 entries + 500 holdings
+  (5,000 dated fund purchases) 0.7 s on first view, 0.5 s after; a 10,000-row Zerodha statement imported
+  in about 10 s, a 10,000-row Groww order history in about 5 s.
+- **Charts (Chart.js 4.5.1, as named in the Phase 1 technology table).** Portfolio page: amount invested
+  by holding (largest 10) / broker / asset class, unrealised gain or loss per priced holding, and, when the
+  reporting currency differs from a holding's, the gain split (market gain, currency gain, total gain).
+  Dashboard: the allocation chart and income vs expenses per month for the last 12 months
+  (`GET /api/finance/monthly-totals?end=YYYY-MM&months=1..36`, per currency, oldest first).
+  - Charts sit beside the tables, never instead of them: each has a caption, a screen-reader summary
+    (`role="img"`) and a "Show the numbers" table; tooltips and tables show the backend's exact strings.
+  - The never-a-float rule has one documented exception: `plot()` in `chartData.ts` converts a decimal
+    string to a number only to position and order marks; `guard.test.ts` allows it there and nowhere else.
+  - Colours are CSS tokens (`--chart-*`) with separate light and dark steps, checked for colour-blind
+    separation; gain/loss use blue/red, categories a fixed order. Axis ticks use plain grouped digits.
+  - Not possible yet: portfolio value over time (only the latest price per ISIN is kept); future scope.
+- **CSV import** is out of scope for this version (future scope); uploads are `.xlsx`.
+- **Health check.** `GET /health` is `ok` only when the database answers and is at the newest Alembic
+  revision. A database that is behind (code updated, `alembic upgrade head` not run) reports
+  `{"status": "degraded", "database": "migration_pending"}` with HTTP 503, and the page footer says so:
+  such a database lacks tables, so the routes that need them fail with a server error.
 - **Sample broker files** live in the git-ignored `sample_data/` folder as private reference
   fixtures. Tests that use them skip when they are absent; all other adapter tests generate
   small synthetic `.xlsx` files, so a fresh clone has a fully runnable test suite.

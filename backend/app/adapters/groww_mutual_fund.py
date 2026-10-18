@@ -13,6 +13,9 @@ errors, and a scheme with any invalid row is excluded entirely rather than parti
 other schemes are unaffected. A row whose Scheme Name itself is missing cannot be attributed to a
 scheme, so it is reported but excludes nothing.
 
+Each holding also keeps its purchase cost (units x NAV) per purchase date, so the FX rate of every
+purchase date can be pinned (FR-20).
+
 Recognition is by content: a sheet qualifies when it has exactly one
 "TRANSACTIONS FROM Mon DD YYYY TO Mon DD YYYY" title and, below it, the full transaction header.
 The statement date is the title's TO date. The personal details block (name, mobile, PAN) is
@@ -32,6 +35,8 @@ from app.adapters.base import BrokerAdapter, StatementFormatError
 from app.adapters.xlsx import Row, find_header, is_blank_row, load_workbook, normalize_text
 from app.domain.holdings import (
     ASSET_CLASS_MUTUAL_FUND,
+    COST_DATE_PLACES,
+    CostDate,
     InvalidValue,
     NormalizedHolding,
     ParseResult,
@@ -87,6 +92,7 @@ class _Transaction:
     transaction_type: str
     units: Decimal
     nav: Decimal
+    on: date
 
 
 @dataclass
@@ -94,6 +100,7 @@ class _SchemeTotals:
     purchase_units: Decimal = field(default_factory=Decimal)
     purchase_cost: Decimal = field(default_factory=Decimal)  # SUM(PURCHASE units x PURCHASE NAV)
     redeemed_units: Decimal = field(default_factory=Decimal)
+    cost_by_date: dict[date, Decimal] = field(default_factory=dict)  # PURCHASE units x NAV per date
 
 
 class GrowwMutualFundAdapter(BrokerAdapter):
@@ -221,12 +228,12 @@ def _parse_row(
     transaction_type = read(TRANSACTION_TYPE, _parse_transaction_type)
     units = read(UNITS, parse_positive_decimal)
     nav = read(NAV, parse_non_negative_decimal)
-    # Date is validated to catch corrupt rows; it does not affect the holding. Amount is never read.
-    read(DATE, _parse_transaction_date)
+    # Date dates the purchase cost for FX pinning; it does not affect units or average. Amount is never read.
+    on = read(DATE, _parse_transaction_date)
 
-    if errors or scheme_name is None or transaction_type is None or units is None or nav is None:
+    if errors or scheme_name is None or transaction_type is None or units is None or nav is None or on is None:
         return scheme_name, None, errors
-    return scheme_name, _Transaction(scheme_name, transaction_type, units, nav), []
+    return scheme_name, _Transaction(scheme_name, transaction_type, units, nav, on), []
 
 
 def _aggregate(
@@ -243,9 +250,11 @@ def _aggregate(
             continue
         scheme = totals.setdefault(transaction.scheme_name, _SchemeTotals())
         if transaction.transaction_type == PURCHASE:
+            cost = DECIMAL_CONTEXT.multiply(transaction.units, transaction.nav)
             scheme.purchase_units = DECIMAL_CONTEXT.add(scheme.purchase_units, transaction.units)
-            scheme.purchase_cost = DECIMAL_CONTEXT.add(
-                scheme.purchase_cost, DECIMAL_CONTEXT.multiply(transaction.units, transaction.nav)
+            scheme.purchase_cost = DECIMAL_CONTEXT.add(scheme.purchase_cost, cost)
+            scheme.cost_by_date[transaction.on] = DECIMAL_CONTEXT.add(
+                scheme.cost_by_date.get(transaction.on, Decimal(0)), cost
             )
         else:  # REDEEM: reduces units only; its NAV is irrelevant to the purchase cost basis
             scheme.redeemed_units = DECIMAL_CONTEXT.add(scheme.redeemed_units, transaction.units)
@@ -267,6 +276,11 @@ def _aggregate(
                 native_currency=NATIVE_CURRENCY,
                 source_broker=SOURCE_BROKER,
                 import_batch_id=import_batch_id,
+                cost_dates=tuple(
+                    CostDate(on, cost.quantize(COST_DATE_PLACES))
+                    for on, cost in sorted(scheme.cost_by_date.items())
+                    if cost.quantize(COST_DATE_PLACES) > 0
+                ),
             )
         )
     return holdings

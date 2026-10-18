@@ -11,7 +11,7 @@ export type Call = {
   credentials: RequestCredentials | undefined
 }
 
-export type Reply = { status?: number; body?: unknown } | Error
+export type Reply = { status?: number; body?: unknown } | Error | Response // a Response is returned as is
 type Route = Reply | Reply[] | ((call: Call) => Reply | Promise<Reply>)
 
 export const CSRF = 'test-csrf-token'
@@ -45,13 +45,14 @@ export function fakeApi(routes: Record<string, Route>) {
       document.cookie = `ww_csrf=${CSRF}`
       return new Response(null, { status: 204 })
     }
-    if (url === '/health') return json({ status: 'ok', database: 'ok' })
+    if (url === '/health' && routes['GET /health'] === undefined) return json({ status: 'ok', database: 'ok' })
     const route = routes[`${method} ${url}`] ?? routes[`${method} ${url.split('?')[0]}`]
     if (route === undefined) return json({ detail: 'Not Found' }, 404)
     let reply: Reply
     if (Array.isArray(route)) reply = route.length > 1 ? route.shift()! : route[0]
     else reply = typeof route === 'function' ? await route(call) : route
     if (reply instanceof Error) throw reply
+    if (reply instanceof Response) return reply
     if (reply.status === 204) return new Response(null, { status: 204 })
     return json(reply.body ?? null, reply.status ?? 200)
   })

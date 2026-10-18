@@ -2,12 +2,12 @@
 
 Never part of the default run. Enable explicitly, from backend/:
 
-    RUN_LIVE_FRANKFURTER=1 [RUN_LIVE_TWELVE_DATA=1 TWELVE_DATA_LIVE_ISIN=<ISIN> TWELVE_DATA_LIVE_SYMBOL=<ticker>] \\
+    RUN_LIVE_FRANKFURTER=1 [RUN_LIVE_UPSTOX=1 UPSTOX_LIVE_ISIN=<ISIN>] \\
         .venv/bin/pytest -m live_frankfurter -s tests/test_finance_live.py
 
-Frankfurter is always real here. With the Twelve Data variables set, the synthetic holding (10 units at an
+Frankfurter is always real here. With the Upstox variables set, the synthetic holding (10 units at an
 average of INR 1000, using that public ISIN) is priced live too; otherwise it stays unpriced and the
-response shows it as excluded (complete=false). All amounts are synthetic; the key is never printed.
+response shows it as excluded (complete=false). All amounts are synthetic; the token is never printed.
 """
 
 import json
@@ -22,8 +22,7 @@ from app.repositories import user_repository
 from tests.portfolio_support import nh, seed
 from tests.test_auth import csrf_headers, logged_in_client
 
-ISIN = os.environ.get("TWELVE_DATA_LIVE_ISIN", "") if os.environ.get("RUN_LIVE_TWELVE_DATA") == "1" else ""
-SYMBOL = os.environ.get("TWELVE_DATA_LIVE_SYMBOL", "") if ISIN else ""
+ISIN = os.environ.get("UPSTOX_LIVE_ISIN", "INE002A01018") if os.environ.get("RUN_LIVE_UPSTOX") == "1" else ""
 
 pytestmark = [
     pytest.mark.live_frankfurter,
@@ -52,7 +51,7 @@ def test_live_net_worth_in_eur():
     with SessionLocal() as db:
         user = user_repository.get_by_email(db, "live-networth@example.com")
         seed(db, user.id, "zerodha", "equity", date(2026, 7, 31),
-             [nh("SYNTHETIC HOLDING", ISIN or "INE000D01019", SYMBOL or "SYNTH", qty="10", avg="1000")])
+             [nh("SYNTHETIC HOLDING", ISIN or "INE000D01019", "SYNTH", qty="10", avg="1000")])
 
     response = client.get("/api/finance/net-worth")
     body = response.json()

@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
-import { ApiError, finance } from '../api'
-import { Amount, Badge, Empty, ErrorNotice, FieldError, Loading, PageHeading, TableScroll } from '../components'
+import { ApiError, finance, reports } from '../api'
+import { Amount, Badge, Empty, ErrorNotice, FieldError, Loading, PageHeading, ReportDownloads, TableScroll } from '../components'
 import { currentMonth, formatMonth, formatPercent } from '../format'
 import { placeError } from '../messages'
 import type { Budget, BudgetSummary } from '../types'
@@ -40,7 +40,10 @@ export function BudgetSummaryView({ summary, idPrefix, overFirst = false }: { su
                   <td className="num"><Amount value={line.actual} currency={line.currency} /></td>
                   <td className="num"><Amount value={line.remaining} currency={line.currency} /></td>
                   <td>
-                    <meter min={0} max={100} high={100} value={line.utilization_pct} aria-label={`${line.category}: budget used`} />{' '}
+                    {/* The bar is full from 100 % on, so its colour has to come from the backend's over_budget flag:
+                        with optimum 0, a value up to `low` is drawn as good and one above `high` as bad. */}
+                    <meter min={0} max={100} optimum={0} low={line.over_budget ? 1 : 100} high={line.over_budget ? 99 : 100}
+                      value={line.utilization_pct} aria-label={`${line.category}: budget used`} />{' '}
                     {formatPercent(line.utilization_pct)}
                   </td>
                   <td>{line.over_budget ? <Badge tone="bad">Over budget</Badge> : <Badge tone="ok">Within budget</Badge>}</td>
@@ -207,6 +210,7 @@ export function BudgetsPage() {
         Month
         <input type="month" value={month} required onChange={(e) => e.target.value && setMonth(e.target.value)} />
       </label>
+      <ReportDownloads title={`Monthly report for ${formatMonth(month)}`} onDownload={(format) => reports.monthly(month, format)} />
 
       <section aria-labelledby="budget-vs-actual" aria-busy={summary.loading}>
         <h2 id="budget-vs-actual">Budget vs actual</h2>

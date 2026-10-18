@@ -1,6 +1,7 @@
+from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import CheckConstraint, Enum, ForeignKey, Numeric, String
+from sqlalchemy import CheckConstraint, Date, Enum, ForeignKey, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import ASSET_CLASSES, BROKERS, Base
@@ -38,3 +39,18 @@ class Holding(Base):
     source_broker: Mapped[str] = mapped_column(Enum(*BROKERS, name="broker", native_enum=False, create_constraint=True))
 
     import_batch: Mapped["ImportBatch"] = relationship(back_populates="holdings")
+    cost_dates: Mapped[list["HoldingCostDate"]] = relationship(
+        cascade="all, delete-orphan", order_by="HoldingCostDate.on_date"
+    )
+
+
+class HoldingCostDate(Base):
+    """Part of a holding's cost attributed to one date (domain CostDate), for pinning that date's FX rate."""
+
+    __tablename__ = "holding_cost_dates"
+    __table_args__ = (CheckConstraint("amount > 0", name="amount_positive"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    holding_id: Mapped[int] = mapped_column(ForeignKey("holdings.id", ondelete="CASCADE"), index=True)
+    on_date: Mapped[date] = mapped_column(Date)
+    amount: Mapped[Decimal] = mapped_column(PRICE)

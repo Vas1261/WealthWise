@@ -71,8 +71,8 @@ def test_stale_price_is_used_and_marked():
         unavailable(PriceIssue.SERVICE_UNAVAILABLE),
         unavailable(PriceIssue.NOT_CONFIGURED),
         unavailable(PriceIssue.NOT_ENTITLED),
-        unavailable(PriceIssue.REQUEST_BUDGET_EXHAUSTED),
-        unavailable(PriceIssue.SYMBOL_NOT_FOUND),
+        unavailable(PriceIssue.RATE_LIMITED),
+        unavailable(PriceIssue.NOT_LISTED),
         PriceResult(PriceStatus.FRESH, price=None, as_of=T0, currency="INR"),  # malformed: status without price
     ],
 )

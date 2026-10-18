@@ -9,3 +9,6 @@ afterEach(() => {
   onSessionEnded(null)
   window.location.hash = ''
 })
+
+// jsdom has no canvas: report "no 2D context" quietly, so charts skip drawing and their tables still render.
+HTMLCanvasElement.prototype.getContext = (() => null) as typeof HTMLCanvasElement.prototype.getContext

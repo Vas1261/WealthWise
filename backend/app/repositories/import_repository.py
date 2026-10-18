@@ -6,8 +6,8 @@ from datetime import date
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.domain.holdings import NormalizedHolding
-from app.models import Holding, ImportAttempt, ImportBatch
+from app.domain.holdings import CostDate, NormalizedHolding
+from app.models import Holding, HoldingCostDate, ImportAttempt, ImportBatch
 
 
 def get_batch(db: Session, user_id: int, broker: str, asset_class: str, statement_date: date) -> ImportBatch | None:
@@ -30,6 +30,40 @@ def latest_statement_date(db: Session, user_id: int, broker: str, asset_class: s
             ImportBatch.asset_class == asset_class,
         )
     ).scalar_one_or_none()
+
+
+def previous_snapshot(
+    db: Session, user_id: int, broker: str, asset_class: str, before: date
+) -> tuple[date, list[NormalizedHolding]] | None:
+    """The user's latest snapshot for this broker + asset class dated before `before`, with cost dates."""
+    batch = db.execute(
+        select(ImportBatch)
+        .where(
+            ImportBatch.user_id == user_id,
+            ImportBatch.broker == broker,
+            ImportBatch.asset_class == asset_class,
+            ImportBatch.statement_date < before,
+        )
+        .order_by(ImportBatch.statement_date.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if batch is None:
+        return None
+    return batch.statement_date, [
+        NormalizedHolding(
+            instrument_name=h.instrument_name,
+            isin=h.isin,
+            symbol=h.symbol,
+            asset_class=h.asset_class,
+            quantity=h.quantity,
+            average_buy_price=h.average_buy_price,
+            native_currency=h.native_currency,
+            source_broker=h.source_broker,
+            import_batch_id=h.import_batch_id,
+            cost_dates=tuple(CostDate(d.on_date, d.amount) for d in h.cost_dates),
+        )
+        for h in batch.holdings
+    ]
 
 
 def delete_batch(db: Session, batch: ImportBatch) -> None:
@@ -70,6 +104,7 @@ def create_batch(
             average_buy_price=h.average_buy_price,
             native_currency=h.native_currency,
             source_broker=h.source_broker,
+            cost_dates=[HoldingCostDate(on_date=d.on, amount=d.amount) for d in h.cost_dates],
         )
         for h in holdings
     ]

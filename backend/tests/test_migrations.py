@@ -10,9 +10,10 @@ from app.core.database import SessionLocal, engine
 from app.models import Holding, ImportBatch, User
 
 EXPECTED_TABLES = {
-    "users", "import_batches", "import_attempts", "holdings", "sessions", "instrument_symbols", "market_prices",
-    "finance_entries", "budgets",
+    "users", "import_batches", "import_attempts", "holdings", "sessions", "market_prices",
+    "finance_entries", "budgets", "holding_cost_dates", "historical_fx_rates",
 }
+PINNING_TABLES = {"holding_cost_dates", "historical_fx_rates"}  # 0008
 
 
 def table_names() -> set[str]:
@@ -35,9 +36,23 @@ def test_downgrade_upgrade_round_trip(alembic_config):
 def test_finance_migration_downgrades_to_0005_alone(alembic_config):
     command.upgrade(alembic_config, "head")
     command.downgrade(alembic_config, "0005")
-    assert table_names() == EXPECTED_TABLES - {"finance_entries", "budgets"}
+    # 0005 still had the Twelve Data symbol cache (dropped again by 0007).
+    assert table_names() == EXPECTED_TABLES - {"finance_entries", "budgets"} - PINNING_TABLES | {"instrument_symbols"}
     command.upgrade(alembic_config, "head")
     assert table_names() == EXPECTED_TABLES
+    command.downgrade(alembic_config, "base")
+
+
+def test_upstox_price_cache_migration_replaces_the_twelve_data_caches(alembic_config):
+    command.upgrade(alembic_config, "0006")
+    assert {"instrument_symbols", "market_prices"} <= table_names()
+    assert {c["name"] for c in inspect(engine).get_columns("market_prices")} >= {"symbol", "mic_code"}
+    command.upgrade(alembic_config, "head")
+    assert "instrument_symbols" not in table_names()
+    assert {c["name"] for c in inspect(engine).get_columns("market_prices")} == {
+        "id", "isin", "exchange", "trading_symbol", "price", "currency", "fetched_at"}
+    command.downgrade(alembic_config, "0006")
+    assert {"instrument_symbols", "market_prices"} <= table_names()
     command.downgrade(alembic_config, "base")
 
 

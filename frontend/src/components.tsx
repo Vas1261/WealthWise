@@ -1,4 +1,5 @@
-import { useEffect, useRef, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import type { ReportFormat } from './api'
 import { errorText, fxIssueText } from './messages'
 import { formatDate, formatMoney, formatPercent, formatRate, isNegative, label } from './format'
 import type { FxRate, Totals } from './types'
@@ -29,6 +30,36 @@ export function ErrorNotice({ error, onRetry, children }: { error: unknown; onRe
 }
 
 export type Tone = 'ok' | 'warn' | 'bad' | 'info'
+
+/** PDF and CSV download buttons for one report (FR-23, FR-24). */
+export function ReportDownloads({ title, onDownload }: { title: string; onDownload: (format: ReportFormat) => Promise<void> }) {
+  const [busy, setBusy] = useState<ReportFormat | null>(null)
+  const [error, setError] = useState<unknown>(null)
+
+  async function get(format: ReportFormat) {
+    setBusy(format)
+    setError(null)
+    try {
+      await onDownload(format)
+    } catch (caught) {
+      setError(caught)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <div className="toolbar" role="group" aria-label={title}>
+      <span>{title}:</span>
+      {(['pdf', 'csv'] as const).map((format) => (
+        <button key={format} type="button" onClick={() => get(format)} disabled={busy !== null}>
+          {busy === format ? 'Preparing…' : `Download ${format.toUpperCase()}`}
+        </button>
+      ))}
+      {error !== null && <ErrorNotice error={error} />}
+    </div>
+  )
+}
 
 /** A status label: always readable text, colour only reinforces it. */
 export function Badge({ tone, children }: { tone: Tone; children: ReactNode }) {

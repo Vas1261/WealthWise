@@ -1,11 +1,9 @@
 """Shared helpers for reading broker .xlsx exports."""
 
 import warnings
-import zipfile
 from collections.abc import Iterable, Iterator, Sequence
 
 import openpyxl
-from openpyxl.utils.exceptions import InvalidFileException
 from openpyxl.workbook.workbook import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
@@ -23,7 +21,10 @@ def load_workbook(file_path: str) -> Workbook | None:
             # Broker exports often omit a default cell style; openpyxl substitutes one, which is harmless.
             warnings.filterwarnings("ignore", message="Workbook contains no default style")
             return openpyxl.load_workbook(file_path, data_only=True)
-    except (InvalidFileException, zipfile.BadZipFile, KeyError, OSError):
+    except Exception:  # noqa: BLE001 - an uploaded file is untrusted input
+        # openpyxl has no single error type for a damaged workbook: a bad zip, a missing part and broken
+        # XML each raise something different (BadZipFile, KeyError, ParseError, ValueError, ...). Whatever
+        # the cause, the file is not a readable workbook, which callers report as a rejected statement.
         return None
 
 

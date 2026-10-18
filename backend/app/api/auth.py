@@ -3,7 +3,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_auth_context, get_current_user
@@ -23,6 +23,14 @@ REFRESH_COOKIE_PATH = "/api/auth"
 class RegisterRequest(BaseModel):
     email: EmailStr
     password: str
+
+    @field_validator("email")
+    @classmethod
+    def domain_ending(cls, email: str) -> str:
+        # EmailStr accepts a one-letter ending such as name@gmail.c, but no real domain ends that way.
+        if len(email.rsplit(".", 1)[-1]) < 2:
+            raise ValueError("the part after the last dot must be at least two letters, as in .com")
+        return email
 
 
 class LoginRequest(BaseModel):

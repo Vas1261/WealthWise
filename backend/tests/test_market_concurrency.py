@@ -1,13 +1,16 @@
-"""Concurrent valuations must not race in the market cache (regression for a 500 seen in the dashboard).
+"""Concurrent valuations: one provider request per price, and no cache races (regression for a dashboard 500).
 
 The dashboard loads GET /api/finance/net-worth and GET /api/portfolio in parallel; both value the same
-holdings. Each cache write looks for an existing row and inserts one when there is none, so two requests
-that both look before either writes collide on the unique constraint. These tests force exactly that
-interleaving: a before_flush hook holds every session that is about to INSERT a mapping or price until
-both concurrent sessions have got that far, then lets them write.
+holdings. Within one process the Market Service makes them take turns, so the second finds the first one's
+prices in the cache and makes no request. Between worker processes nothing but the unique constraint keeps
+two inserts of the same ISIN apart; the insert_gate test switches the in-process lock off and forces that
+interleaving with a before_flush hook that holds each session about to INSERT a price until both have got
+that far.
 """
 
+import contextlib
 import threading
+import time
 from datetime import date
 from decimal import Decimal
 
@@ -19,55 +22,29 @@ from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
-from app.domain.market import PriceStatus, RequestBudget, SymbolStatus
-from app.integrations.twelve_data import TwelveDataClient
-from app.models import InstrumentSymbol, MarketPrice
-from app.repositories import market_repository
+from app.domain.market import PriceStatus
+from app.integrations.upstox import UpstoxClient
+from app.models import MarketPrice
 from app.services import market_service
 from tests.portfolio_support import nh, seed
 from tests.test_auth import logged_in_client
-from tests.test_market_service import FAKE_KEY, GROWW_A, ISIN_A, T0, FakeTwelveData
+from tests.test_market_service import EQUITY_A, FAKE_TOKEN, ISIN_A, ISIN_B, T0, FakeUpstox
 
 pytestmark = pytest.mark.usefixtures("migrated_db")
 
 WAIT_SECONDS = 10
 
 
-class InsertGate(list):
-    """Records which inserts reached the gate; arm() starts holding them (after any single-threaded setup)."""
+class SlowUpstox(FakeUpstox):
+    """Every request takes long enough for the other concurrent requests to catch up with it."""
 
-    armed = False
-
-    def arm(self) -> "InsertGate":
-        self.armed = True
-        return self
+    def handle(self, request: httpx2.Request) -> httpx2.Response:
+        time.sleep(0.2)
+        return super().handle(request)
 
 
-@pytest.fixture
-def insert_gate():
-    """Once armed, make every session about to insert a mapping or price wait for one other such session."""
-    gates = {InstrumentSymbol: threading.Barrier(2, timeout=WAIT_SECONDS),
-             MarketPrice: threading.Barrier(2, timeout=WAIT_SECONDS)}
-    reached = InsertGate()
-
-    def hold(session, _context, _instances):
-        if not reached.armed:
-            return
-        for model, barrier in gates.items():
-            if any(isinstance(obj, model) for obj in session.new):
-                reached.append(model.__name__)
-                try:
-                    barrier.wait()
-                except threading.BrokenBarrierError:  # only one writer got here: nothing to race with
-                    pass
-
-    event.listen(Session, "before_flush", hold)
-    yield reached
-    event.remove(Session, "before_flush", hold)
-
-
-def gated_client(market: FakeTwelveData) -> TwelveDataClient:
-    return TwelveDataClient(SecretStr(FAKE_KEY), transport=httpx2.MockTransport(market.handle))
+def client_for(market: FakeUpstox) -> UpstoxClient:
+    return UpstoxClient(SecretStr(FAKE_TOKEN), transport=httpx2.MockTransport(market.handle))
 
 
 def run_together(*jobs):
@@ -92,79 +69,84 @@ def run_together(*jobs):
     return results, errors
 
 
-def rows(model) -> int:
+def price_rows() -> int:
     with SessionLocal() as db:
-        return db.execute(select(func.count()).select_from(model)).scalar_one()
+        return db.execute(select(func.count()).select_from(MarketPrice)).scalar_one()
 
 
-def test_concurrent_first_valuations_share_one_mapping_and_one_price(insert_gate):
-    market = FakeTwelveData()
-    budget = RequestBudget(1000)
-    insert_gate.arm()
-
-    def value():
-        client = gated_client(market)
+def value_a(market):
+    def job():
+        client = client_for(market)
         try:
             with SessionLocal() as db:
-                return market_service.get_prices(db, [GROWW_A], client=client, now=T0, budget=budget)
+                return market_service.get_prices(db, [EQUITY_A], client=client, now=T0)
         finally:
             client.close()
+    return job
 
-    results, errors = run_together(value, value)
 
+# --- One process: requests take turns and share the result --------------------------------------------
+
+@pytest.mark.parametrize("requests", [2, 4], ids=["dashboard", "dashboard-in-dev-strict-mode"])
+def test_concurrent_valuations_fetch_each_price_once(requests):
+    market = SlowUpstox()
+    results, errors = run_together(*[value_a(market)] * requests)
     assert errors == []
-    assert insert_gate.count("InstrumentSymbol") == 2 and insert_gate.count("MarketPrice") == 2  # both raced
-    assert [(r.status, r.price, r.currency) for (r,) in results] == [
-        (PriceStatus.FRESH, Decimal("101.25000"), "INR")] * 2
-    assert (rows(InstrumentSymbol), rows(MarketPrice)) == (1, 1)
-    with SessionLocal() as db:
-        mapping = market_repository.get_symbol_mapping(db, ISIN_A)
-        cached = market_repository.get_cached_price(db, "SYNTHA", "XNSE")
-    assert (mapping.status, mapping.symbol, mapping.mic_code) == (SymbolStatus.RESOLVED, "SYNTHA", "XNSE")
-    assert (cached.price, cached.fetched_at) == (Decimal("101.25"), T0)
+    assert [(r.status, r.price) for (r,) in results] == [(PriceStatus.FRESH, Decimal("101.25"))] * requests
+    assert len(market.calls) == 1
+    assert price_rows() == 1
 
 
-def test_concurrent_price_inserts_for_an_already_resolved_listing(insert_gate):
-    market = FakeTwelveData()
-    budget = RequestBudget(1000)
-    with SessionLocal() as db:  # the mapping exists already: only the price rows can race
-        market_service.resolve_isins(db, [GROWW_A], client=gated_client(market), now=T0, budget=budget)
-    insert_gate.arm()
-
-    def value():
-        client = gated_client(market)
-        try:
-            with SessionLocal() as db:
-                return market_service.get_prices(db, [GROWW_A], client=client, now=T0, budget=budget)
-        finally:
-            client.close()
-
-    results, errors = run_together(value, value)
-    assert errors == []
-    assert insert_gate.count("MarketPrice") == 2
-    assert [r.status for (r,) in results] == [PriceStatus.FRESH] * 2
-    assert rows(MarketPrice) == 1
-
-
-def test_simultaneous_dashboard_requests_both_succeed(insert_gate, monkeypatch):
-    """The real trigger: net worth and portfolio requested at the same moment by the dashboard."""
-    market = FakeTwelveData()
-    monkeypatch.setattr(market_service, "default_client", lambda: gated_client(market))
-    monkeypatch.setattr(market_service, "_shared_budget", RequestBudget(1000))
+def test_simultaneous_dashboard_requests_share_one_price_request(monkeypatch):
+    market = SlowUpstox()
+    monkeypatch.setattr(market_service, "default_client", lambda: client_for(market))
     portfolio_client = logged_in_client("race@example.com")
     net_worth_client = TestClient(portfolio_client.app, cookies=portfolio_client.cookies)
     with SessionLocal() as db:
         user_id = portfolio_client.get("/api/auth/me").json()["id"]
-        seed(db, user_id, "zerodha", "equity", date(2026, 7, 31), [nh(isin=ISIN_A, symbol="SYNTHA", qty="10", avg="100")])
-    insert_gate.arm()
+        seed(db, user_id, "zerodha", "equity", date(2026, 7, 31), [
+            nh(isin=ISIN_A, symbol="SYNTHA", qty="10", avg="100"),
+            nh(name="SYNTHB", isin=ISIN_B, symbol="SYNTHB", qty="2", avg="50"),
+        ])
 
     (portfolio, net_worth), errors = run_together(
         lambda: portfolio_client.get("/api/portfolio"), lambda: net_worth_client.get("/api/finance/net-worth"))
 
     assert errors == []
     assert (portfolio.status_code, net_worth.status_code) == (200, 200)
-    assert insert_gate.count("InstrumentSymbol") == 2  # the race really happened
-    assert portfolio.json()["reporting_totals"]["current_value"] == "1012.50"
-    assert net_worth.json()["portfolio_value"] == "1012.50" == net_worth.json()["net_worth"]
-    assert portfolio.json()["holdings"][0]["price_status"] == "fresh"
-    assert (rows(InstrumentSymbol), rows(MarketPrice)) == (1, 1)
+    assert [h["price_status"] for h in portfolio.json()["holdings"]] == ["fresh", "fresh"]
+    assert portfolio.json()["reporting_totals"]["current_value"] == "1123.50"  # 10 x 101.25 + 2 x 55.50
+    assert net_worth.json()["portfolio_value"] == "1123.50" and net_worth.json()["unpriced_holdings"] == 0
+    assert len(market.calls) == 1
+    assert price_rows() == 2
+
+
+# --- Separate processes: only the database keeps inserts apart ----------------------------------------
+
+@pytest.fixture
+def insert_gate(monkeypatch):
+    """Make every session about to insert a price wait for one other such session."""
+    monkeypatch.setattr(market_service, "_fetch_lock", contextlib.nullcontext())  # as between two workers
+    barrier = threading.Barrier(2, timeout=WAIT_SECONDS)
+    reached: list[str] = []
+
+    def hold(session, _context, _instances):
+        if any(isinstance(obj, MarketPrice) for obj in session.new):
+            reached.append("MarketPrice")
+            try:
+                barrier.wait()
+            except threading.BrokenBarrierError:  # only one writer got here: nothing to race with
+                pass
+
+    event.listen(Session, "before_flush", hold)
+    yield reached
+    event.remove(Session, "before_flush", hold)
+
+
+def test_concurrent_first_inserts_from_two_processes_keep_one_row(insert_gate):
+    market = FakeUpstox()
+    results, errors = run_together(value_a(market), value_a(market))
+    assert errors == []
+    assert insert_gate.count("MarketPrice") == 2  # both really raced to insert
+    assert [(r.status, r.price) for (r,) in results] == [(PriceStatus.FRESH, Decimal("101.25"))] * 2
+    assert price_rows() == 1

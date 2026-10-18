@@ -4,12 +4,27 @@ No database, HTTP, or file access here; adapters read files and call these funct
 """
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 
 ASSET_CLASS_EQUITY = "equity"
 ASSET_CLASS_MUTUAL_FUND = "mutual_fund"
+
+# Cost-date amounts are weights stored like prices (6 dp); only their proportions matter.
+COST_DATE_PLACES = Decimal("0.000001")
+
+
+@dataclass(frozen=True)
+class CostDate:
+    """Part of a holding's cost basis attributed to one date, for pinning the FX rate of that date (FR-20).
+
+    The amounts of a holding are weights: the pinned rate is their amount-weighted average rate.
+    """
+
+    on: date
+    amount: Decimal
 
 
 @dataclass(frozen=True)
@@ -25,6 +40,41 @@ class NormalizedHolding:
     native_currency: str  # e.g. "INR"
     source_broker: str  # "zerodha" | "groww"
     import_batch_id: str
+    # Dates the cost was paid on (mutual funds: one per purchase date). Empty: the statement date applies.
+    cost_dates: tuple[CostDate, ...] = ()
+
+
+def effective_cost_dates(cost_dates: Sequence[CostDate], statement_date: date) -> tuple[CostDate, ...]:
+    """The dates a cost is pinned to: its cost dates, or else (holdings stored without any) the statement date."""
+    return tuple(cost_dates) or (CostDate(statement_date, Decimal(1)),)
+
+
+def carry_cost_dates(
+    previous: Sequence[CostDate],
+    previous_quantity: Decimal,
+    previous_cost: Decimal,
+    quantity: Decimal,
+    cost: Decimal,
+    statement_date: date,
+) -> tuple[CostDate, ...]:
+    """Cost dates of a holding in a new holdings statement, given the same holding in the previous statement.
+
+    A snapshot does not show trades, so the change between two statements is read with the
+    average-cost method: units still held from before keep their earlier dates (scaled to the cost
+    they still carry), and only cost added since then is dated to the new statement. Sales and bonus
+    or split shares therefore add nothing new, and buying more adds the extra cost on the new date.
+    """
+    if cost.quantize(COST_DATE_PLACES) <= 0:
+        return ()  # nothing paid (e.g. free shares): nothing to pin
+    total = sum((d.amount for d in previous), Decimal(0))
+    if total <= 0 or previous_quantity <= 0 or previous_cost <= 0:
+        return (CostDate(statement_date, cost.quantize(COST_DATE_PLACES)),)
+    carried = min(previous_cost * min(Decimal(1), quantity / previous_quantity), cost)
+    dates = [CostDate(d.on, (d.amount * carried / total).quantize(COST_DATE_PLACES)) for d in previous]
+    added = (cost - carried).quantize(COST_DATE_PLACES)
+    if added > 0:
+        dates.append(CostDate(statement_date, added))
+    return tuple(d for d in dates if d.amount > 0) or (CostDate(statement_date, cost.quantize(COST_DATE_PLACES)),)
 
 
 @dataclass(frozen=True)

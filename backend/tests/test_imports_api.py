@@ -1,6 +1,7 @@
 """POST /api/imports over HTTP with synthetic statements: auth, CSRF, ownership, snapshot rules, history."""
 
 import tempfile
+import zipfile
 from datetime import date
 from pathlib import Path
 
@@ -136,6 +137,21 @@ def test_not_a_spreadsheet_with_xlsx_name(alice, tmp_path):
     fake.write_text("plain text pretending to be a workbook")
     response = upload(alice, str(fake))
     assert (response.status_code, response.json()["code"]) == (422, "unsupported_statement")
+
+
+@pytest.mark.parametrize("damaged_part", ["xl/workbook.xml", "xl/worksheets/sheet1.xml"])
+def test_damaged_workbook_is_rejected_not_a_server_error(alice, tmp_path, damaged_part):
+    """A real .xlsx whose XML is broken (e.g. a cut-off download) is a rejected statement, never a 500."""
+    good = groww_equity_file(tmp_path / "good.xlsx")
+    damaged = tmp_path / "damaged.xlsx"
+    with zipfile.ZipFile(good) as source, zipfile.ZipFile(damaged, "w") as target:
+        for item in source.infolist():
+            data = source.read(item.filename)
+            target.writestr(item, data[: len(data) // 2] if item.filename == damaged_part else data)
+    response = upload(alice, str(damaged))
+    assert (response.status_code, response.json()["code"]) == (422, "unsupported_statement")
+    assert history(user_id_of(alice)) == [("rejected", None, None, 0, 0)]
+    assert effective(user_id_of(alice)) == []
 
 
 @pytest.mark.parametrize("name", ["statement.csv", "statement.xls", "statement", "statement.xlsx.exe"])

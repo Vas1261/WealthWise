@@ -1,4 +1,5 @@
 import { finance, portfolio } from '../api'
+import { AllocationChart, IncomeExpensesChart } from '../charts'
 import { Amount, ErrorNotice, FxRatesTable, Loading, Notice, PageHeading, TotalsTable } from '../components'
 import { currentMonth, formatDateTime, formatMoney, formatMonth } from '../format'
 import { hrefFor } from '../route'
@@ -70,6 +71,7 @@ export function DashboardPage() {
   const netWorth = useApi(finance.netWorth)
   const pf = useApi(portfolio.get)
   const budgets = useApi(() => finance.budgetSummary(month), month)
+  const monthly = useApi(() => finance.monthlyTotals(month), month)
 
   return (
     <>
@@ -95,12 +97,23 @@ export function DashboardPage() {
           <p className="muted">In each holding's own currency (not converted).</p>
           {pf.data && pf.data.holdings.length > 0 ? (
             <>
+              <AllocationChart data={pf.data} />
               <TotalsTable id="dash-asset-caption" caption="By asset class" groups={pf.data.by_asset_class} />
               <TotalsTable id="dash-broker-caption" caption="By broker" groups={pf.data.by_broker} />
             </>
           ) : (
             !pf.loading && pf.error === null && <p className="muted">Nothing to break down yet.</p>
           )}
+        </section>
+
+        <section className="card wide" aria-labelledby="dash-monthly" aria-busy={monthly.loading}>
+          <h2 id="dash-monthly">Income and expenses, last 12 months</h2>
+          {monthly.error !== null && <ErrorNotice error={monthly.error} onRetry={monthly.reload} />}
+          {!monthly.data && monthly.loading && <Loading what="monthly totals" />}
+          {monthly.data && netWorth.data && (
+            <IncomeExpensesChart points={monthly.data} currency={netWorth.data.reporting_currency} />
+          )}
+          <p><a href={hrefFor('finance')}>Record income and expenses</a></p>
         </section>
 
         <section className="card wide" aria-labelledby="dash-budgets" aria-busy={budgets.loading}>

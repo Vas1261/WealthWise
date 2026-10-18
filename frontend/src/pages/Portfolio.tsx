@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { ApiError, portfolio } from '../api'
+import { ApiError, portfolio, reports } from '../api'
 import {
   Amount,
   Badge,
@@ -10,9 +10,11 @@ import {
   Notice,
   PageHeading,
   PriceCounts,
+  ReportDownloads,
   TableScroll,
   TotalsTable,
 } from '../components'
+import { AllocationChart, GainSplitChart, PnlChart } from '../charts'
 import { formatDate, formatDateTime, formatMoney, formatPercent, formatPrice, formatQuantity, label } from '../format'
 import { priceIssueText } from '../messages'
 import { hrefFor } from '../route'
@@ -49,7 +51,10 @@ export function PortfolioOverview({ data: p, idPrefix }: { data: Portfolio; idPr
         </Notice>
       )}
       {p.contains_stale_prices && (
-        <Notice>Some prices are stale (the price service could not be reached); oldest from {formatDateTime(p.oldest_price_as_of)}.</Notice>
+        <Notice>
+          Some prices are stale: the last refresh brought no new price for them, so the last known one is used (oldest from{' '}
+          {formatDateTime(p.oldest_price_as_of)}). The holdings table on the Portfolio page says why for each one.
+        </Notice>
       )}
       {r && (
         <>
@@ -81,6 +86,41 @@ export function PortfolioOverview({ data: p, idPrefix }: { data: Portfolio; idPr
               <dd><Amount value={r.cost_floor_value} currency={r.currency} /></dd>
             </div>
           </dl>
+          {p.fx_required && r.total_gain !== null && (
+            <>
+              <h3>Gain split in {r.currency}</h3>
+              <p className="muted">
+                Costs are converted at the exchange rates of the dates they were paid on, so the gain separates
+                the change in prices from the change in exchange rates.
+              </p>
+              <dl className="figures">
+                <div>
+                  <dt>Market gain (price change, today's rate)</dt>
+                  <dd><Amount value={r.unrealized_pnl} currency={r.currency} /></dd>
+                </div>
+                <div>
+                  <dt>Currency gain (exchange-rate change)</dt>
+                  <dd><Amount value={r.currency_gain} currency={r.currency} /></dd>
+                </div>
+                <div>
+                  <dt>Total gain</dt>
+                  <dd>
+                    <Amount value={r.total_gain} currency={r.currency} /> ({formatPercent(r.total_gain_pct)})
+                  </dd>
+                </div>
+                <div>
+                  <dt>Total invested at purchase-time rates</dt>
+                  <dd><Amount value={r.invested_value_pinned} currency={r.currency} /></dd>
+                </div>
+              </dl>
+            </>
+          )}
+          {p.pinned_fx_unavailable.length > 0 && (
+            <Notice>
+              The exchange rates of the purchase dates for {p.pinned_fx_unavailable.join(', ')} could not be fetched yet,
+              so the currency gain is not shown. It appears once they are available.
+            </Notice>
+          )}
           {r.current_value === null && <Notice>No holding has a current price, so there is no current value yet.</Notice>}
           <p className="muted">
             <PriceCounts totals={r} />
@@ -99,7 +139,13 @@ export function PortfolioOverview({ data: p, idPrefix }: { data: Portfolio; idPr
   )
 }
 
-function HoldingsTable({ holdings }: { holdings: Holding[] }) {
+/** When a holding's cost is pinned: one date, or the range of its purchase dates. */
+function pinnedOn(h: Holding): string {
+  if (h.cost_date_count === 1) return `rate of ${formatDate(h.cost_dates_from)}`
+  return `${h.cost_date_count} purchase dates, ${formatDate(h.cost_dates_from)} – ${formatDate(h.cost_dates_to)}`
+}
+
+function HoldingsTable({ holdings, pinnedCurrency }: { holdings: Holding[]; pinnedCurrency: string | null }) {
   return (
     <TableScroll labelledBy="holdings-caption">
       <table>
@@ -118,6 +164,7 @@ function HoldingsTable({ holdings }: { holdings: Holding[] }) {
             <th scope="col" className="num">Unrealised P&amp;L</th>
             <th scope="col" className="num">P&amp;L %</th>
             <th scope="col" className="num">At cost (mutual funds)</th>
+            {pinnedCurrency && <th scope="col" className="num">Cost in {pinnedCurrency} at purchase-time rates</th>}
             <th scope="col">Price status</th>
           </tr>
         </thead>
@@ -139,6 +186,12 @@ function HoldingsTable({ holdings }: { holdings: Holding[] }) {
               <td className="num"><Amount value={h.unrealized_pnl} currency={h.native_currency} /></td>
               <td className="num">{formatPercent(h.unrealized_pnl_pct)}</td>
               <td className="num">{h.cost_floor_value === null ? '—' : formatMoney(h.cost_floor_value, h.native_currency)}</td>
+              {pinnedCurrency && (
+                <td className="num">
+                  <Amount value={h.pinned_cost} currency={pinnedCurrency} />
+                  <span className="sub">{pinnedOn(h)}</span>
+                </td>
+              )}
               <td><PriceStatus holding={h} /></td>
             </tr>
           ))}
@@ -187,6 +240,7 @@ export function PortfolioPage() {
         </span>
       </div>
       {refreshError !== null && <PortfolioError error={refreshError} onRetry={handleRefresh} />}
+      <ReportDownloads title="Portfolio report" onDownload={reports.portfolio} />
       <section aria-labelledby="pf-summary" aria-busy={state.loading || refreshing}>
         <h2 id="pf-summary">Summary{p ? ` (${p.reporting_currency})` : ''}</h2>
         {state.error !== null && <PortfolioError error={state.error} onRetry={state.reload} />}
@@ -195,6 +249,12 @@ export function PortfolioPage() {
       </section>
       {p && p.holdings.length > 0 && (
         <>
+          <section aria-labelledby="pf-charts">
+            <h2 id="pf-charts">Charts</h2>
+            <AllocationChart data={p} />
+            <PnlChart holdings={p.holdings} />
+            {p.fx_required && p.reporting_totals && <GainSplitChart totals={p.reporting_totals} />}
+          </section>
           <section aria-labelledby="pf-native">
             <h2 id="pf-native">Totals by currency</h2>
             <TotalsTable id="pf-native-caption" caption="Totals in each currency (not converted)" groups={{ all: p.totals_by_currency }} />
@@ -206,7 +266,7 @@ export function PortfolioPage() {
           </section>
           <section aria-labelledby="pf-holdings">
             <h2 id="pf-holdings">Holdings</h2>
-            <HoldingsTable holdings={p.holdings} />
+            <HoldingsTable holdings={p.holdings} pinnedCurrency={p.fx_required ? p.reporting_currency : null} />
           </section>
         </>
       )}

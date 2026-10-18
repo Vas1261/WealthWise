@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated, Literal, TypeVar
 
-from fastapi import APIRouter, Depends, Query, Request, Response, status
+from fastapi import APIRouter, Depends, Path, Query, Request, Response, status
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -29,7 +29,7 @@ from app.api.portfolio import FxRateOut, _fx_rate
 from app.core.database import get_session
 from app.domain.finance import BudgetSummary, FinanceIssue, FinanceValidationError, NetWorth
 from app.models import Budget, FinanceEntry, User
-from app.services import finance_service, portfolio_service
+from app.services import finance_service, portfolio_service, report_service
 
 PREFIX = "/api/finance"
 router = APIRouter(prefix=PREFIX, tags=["finance"])
@@ -38,6 +38,10 @@ CurrentUser = Annotated[User, Depends(get_current_user)]
 DbSession = Annotated[Session, Depends(get_session)]
 Kind = Literal["income", "expense"]
 T = TypeVar("T")
+# Row ids are 64-bit integers in the database. A larger number in the URL cannot even be bound to a query
+# (SQLite raises OverflowError, which surfaced as a 500), so it is refused like any other malformed id.
+MAX_ROW_ID = 2**63 - 1
+RowId = Annotated[int, Path(le=MAX_ROW_ID)]
 
 ISSUE_MESSAGES = {
     FinanceIssue.INVALID_AMOUNT: (
@@ -108,6 +112,18 @@ class UnbudgetedOut(BaseModel):
     category: str
     currency: str
     actual: str
+
+
+class MonthTotalsOut(BaseModel):
+    currency: str
+    income: str
+    expenses: str
+    net: str
+
+
+class MonthPointOut(BaseModel):
+    month: str  # YYYY-MM
+    totals: list[MonthTotalsOut]  # one per currency with entries that month; empty when none
 
 
 class BudgetSummaryOut(BaseModel):
@@ -245,12 +261,12 @@ def list_entries(
 
 
 @router.get("/entries/{entry_id}", response_model=EntryOut)
-def get_entry(entry_id: int, user: CurrentUser, db: DbSession) -> EntryOut | JSONResponse:
+def get_entry(entry_id: RowId, user: CurrentUser, db: DbSession) -> EntryOut | JSONResponse:
     return _run(lambda: _entry(finance_service.get_entry(db, user, entry_id)))
 
 
 @router.put("/entries/{entry_id}", response_model=EntryOut)
-def replace_entry(entry_id: int, body: EntryIn, user: CurrentUser, db: DbSession) -> EntryOut | JSONResponse:
+def replace_entry(entry_id: RowId, body: EntryIn, user: CurrentUser, db: DbSession) -> EntryOut | JSONResponse:
     return _run(lambda: _entry(finance_service.replace_entry(
         db, user, entry_id, kind=body.kind, category=body.category, amount=body.amount, entry_date=body.date,
         description=body.description,
@@ -258,7 +274,7 @@ def replace_entry(entry_id: int, body: EntryIn, user: CurrentUser, db: DbSession
 
 
 @router.delete("/entries/{entry_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_entry(entry_id: int, user: CurrentUser, db: DbSession) -> Response:
+def delete_entry(entry_id: RowId, user: CurrentUser, db: DbSession) -> Response:
     result = _run(lambda: finance_service.delete_entry(db, user, entry_id))
     return result if isinstance(result, JSONResponse) else Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -284,17 +300,31 @@ def list_budgets(user: CurrentUser, db: DbSession, month: Annotated[str, Query()
 
 
 @router.put("/budgets/{budget_id}", response_model=BudgetOut)
-def set_budget_amount(budget_id: int, body: BudgetAmountIn, user: CurrentUser, db: DbSession) -> BudgetOut | JSONResponse:
+def set_budget_amount(budget_id: RowId, body: BudgetAmountIn, user: CurrentUser, db: DbSession) -> BudgetOut | JSONResponse:
     return _run(lambda: _budget(finance_service.set_budget_amount(db, user, budget_id, body.amount)))
 
 
 @router.delete("/budgets/{budget_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_budget(budget_id: int, user: CurrentUser, db: DbSession) -> Response:
+def delete_budget(budget_id: RowId, user: CurrentUser, db: DbSession) -> Response:
     result = _run(lambda: finance_service.delete_budget(db, user, budget_id))
     return result if isinstance(result, JSONResponse) else Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # --- Net worth -----------------------------------------------------------------------------------------
+
+
+@router.get("/monthly-totals", response_model=list[MonthPointOut])
+def monthly_totals(
+    user: CurrentUser, db: DbSession, end: Annotated[str, Query()], months: Annotated[int, Query(ge=1, le=36)] = 12,
+) -> list[MonthPointOut] | JSONResponse:
+    """Income, expenses and net per currency for `months` months ending with `end` (YYYY-MM), oldest first."""
+    return _run(lambda: [
+        MonthPointOut(month=_month(p.year, p.month), totals=[
+            MonthTotalsOut(currency=t.currency, income=_money(t.income), expenses=_money(t.expenses), net=_money(t.net))
+            for t in p.totals
+        ])
+        for p in report_service.monthly_totals(db, user, end, months)
+    ])
 
 
 @router.get("/net-worth", response_model=NetWorthOut)

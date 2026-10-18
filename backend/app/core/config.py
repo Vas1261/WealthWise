@@ -22,13 +22,11 @@ class Settings(BaseSettings):
     csrf_cookie_name: str = "ww_csrf"
     csrf_header_name: str = "X-CSRF-Token"
 
-    # Twelve Data market prices (Module 6). Optional: without a key the API still starts and
-    # market data reports NOT_CONFIGURED. SecretStr keeps the key out of repr() and logs.
-    twelve_data_api_key: SecretStr = SecretStr("")
+    # Upstox market prices (Module 6). Optional: without a token the API still starts and
+    # market data reports NOT_CONFIGURED. SecretStr keeps the token out of repr() and logs.
+    upstox_analytics_token: SecretStr = SecretStr("")
     # Spec 4.5: prices are cached for a short interval (5-15 minutes).
     market_price_ttl_minutes: int = Field(default=10, ge=5, le=15)
-    # Requests allowed per rolling minute, matching the plan's credit limit (free Basic plan: 8).
-    twelve_data_credits_per_minute: int = Field(default=8, ge=1)
 
     # Frankfurter FX rates (Module 8). No API key exists or is needed.
     fx_enabled: bool = True

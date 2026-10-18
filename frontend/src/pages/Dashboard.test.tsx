@@ -10,6 +10,7 @@ function routes(overrides: Record<string, unknown> = {}) {
     'GET /api/finance/net-worth': { body: netWorthData() },
     'GET /api/portfolio': { body: portfolioData() },
     'GET /api/finance/budgets/summary': { body: summaryData() },
+    'GET /api/finance/monthly-totals': { body: [] },
     ...overrides,
   } as Parameters<typeof fakeApi>[0]
 }
@@ -161,5 +162,20 @@ describe('dashboard', () => {
     }))
     render(<DashboardPage />)
     expect(await screen.findByText(/no holding has a current price/i)).toBeTruthy()
+  })
+
+  it('charts the last 12 months of income and expenses in the reporting currency, with a table', async () => {
+    const api = fakeApi(routes({ 'GET /api/finance/monthly-totals': { body: [
+      { month: '2026-09', totals: [{ currency: 'INR', income: '5000.00', expenses: '250.50', net: '4749.50' }] },
+      { month: '2026-10', totals: [{ currency: 'EUR', income: '10.00', expenses: '0.00', net: '10.00' }] },
+    ] } }))
+    render(<DashboardPage />)
+    const card = section(/income and expenses, last 12 months/i)
+    const rows = within(await within(card).findByRole('table')).getAllByRole('row').slice(1)
+    expect(rows.map((r) => r.textContent)).toEqual([
+      `September 2026${formatMoney('5000.00', 'INR')}${formatMoney('250.50', 'INR')}${formatMoney('4749.50', 'INR')}`,
+      'October 2026No entries——'])
+    expect(within(card).getByText(/entries in other currencies are not in this chart/i)).toBeTruthy()
+    expect(api.apiCalls().find((c) => c.url.startsWith('/api/finance/monthly-totals'))!.url).toMatch(/end=\d{4}-\d{2}&months=12/)
   })
 })

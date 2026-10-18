@@ -29,7 +29,7 @@ export type Totals = {
   oldest_price_as_of: string | null
 }
 
-export type FxStatus = 'identity' | 'fresh' | 'stale' | 'unavailable'
+export type FxStatus = 'identity' | 'fresh' | 'stale' | 'historical' | 'unavailable'
 
 export type FxRate = {
   currency: string
@@ -39,7 +39,16 @@ export type FxRate = {
   issue: string | null
 }
 
-export type ReportingTotals = Totals & { fx_rates: FxRate[]; fx_stale: boolean }
+export type ReportingTotals = Totals & {
+  fx_rates: FxRate[]
+  fx_stale: boolean
+  // Pinned FX (FR-20): cost at the exchange rates of the dates it was paid on; null when a pinned rate is missing.
+  invested_value_pinned: Decimal | null
+  priced_invested_value_pinned: Decimal | null
+  currency_gain: Decimal | null
+  total_gain: Decimal | null
+  total_gain_pct: Decimal | null
+}
 
 export type PriceStatus = 'fresh' | 'stale' | 'unavailable' | 'not_supported'
 
@@ -64,6 +73,11 @@ export type Holding = {
   unrealized_pnl: Decimal | null
   unrealized_pnl_pct: Decimal | null
   cost_floor_value: Decimal | null
+  pinned_fx_rate: Decimal | null
+  pinned_cost: Decimal | null // in the reporting currency
+  cost_dates_from: string
+  cost_dates_to: string
+  cost_date_count: number
 }
 
 export type Portfolio = {
@@ -71,6 +85,7 @@ export type Portfolio = {
   reporting_totals: ReportingTotals | null
   fx_required: boolean
   fx_unavailable: string[]
+  pinned_fx_unavailable: string[]
   contains_stale_prices: boolean
   oldest_price_as_of: string | null
   totals_by_currency: Record<string, Totals>
@@ -78,6 +93,10 @@ export type Portfolio = {
   by_broker: Record<string, Record<string, Totals>>
   holdings: Holding[]
 }
+
+export type MonthTotals = { currency: string; income: Decimal; expenses: Decimal; net: Decimal }
+
+export type MonthPoint = { month: string; totals: MonthTotals[] }
 
 export type RowError = { row: number; field: string; message: string }
 

@@ -37,7 +37,17 @@ export function fx(overrides: Partial<FxRate> = {}): FxRate {
 }
 
 export function reporting(overrides: Partial<ReportingTotals> = {}): ReportingTotals {
-  return { ...totals(), fx_rates: [fx()], fx_stale: false, ...overrides }
+  return {
+    ...totals(),
+    fx_rates: [fx()],
+    fx_stale: false,
+    invested_value_pinned: '1000.00',
+    priced_invested_value_pinned: '1000.00',
+    currency_gain: '0.00',
+    total_gain: '100.00',
+    total_gain_pct: '10.00',
+    ...overrides,
+  }
 }
 
 export function holding(overrides: Partial<Holding> = {}): Holding {
@@ -62,6 +72,11 @@ export function holding(overrides: Partial<Holding> = {}): Holding {
     unrealized_pnl: '100.00',
     unrealized_pnl_pct: '10.00',
     cost_floor_value: null,
+    pinned_fx_rate: '1.000000',
+    pinned_cost: '1000.00',
+    cost_dates_from: '2026-07-31',
+    cost_dates_to: '2026-07-31',
+    cost_date_count: 1,
     ...overrides,
   }
 }
@@ -73,6 +88,7 @@ export function portfolioData(overrides: Partial<Portfolio> = {}): Portfolio {
     reporting_totals: reporting(),
     fx_required: false,
     fx_unavailable: [],
+    pinned_fx_unavailable: [],
     contains_stale_prices: false,
     oldest_price_as_of: T0,
     totals_by_currency: { INR: t },
@@ -84,7 +100,7 @@ export function portfolioData(overrides: Partial<Portfolio> = {}): Portfolio {
 }
 
 export const EMPTY_PORTFOLIO: Portfolio = {
-  reporting_currency: 'INR', reporting_totals: null, fx_required: false, fx_unavailable: [],
+  reporting_currency: 'INR', reporting_totals: null, fx_required: false, fx_unavailable: [], pinned_fx_unavailable: [],
   contains_stale_prices: false, oldest_price_as_of: null, totals_by_currency: {}, by_asset_class: {}, by_broker: {},
   holdings: [],
 }

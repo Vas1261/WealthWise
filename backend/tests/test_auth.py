@@ -73,6 +73,9 @@ def test_register_creates_user(client):
 
 def test_register_rejects_invalid_email_and_weak_password(client):
     assert register(client, email="not-an-email").status_code == 422
+    rejected = register(client, email="someone@gmail.c")  # one-letter ending: a typo for .com
+    assert rejected.status_code == 422 and rejected.json()["detail"][0]["loc"] == ["body", "email"]
+    assert register(client, email="someone@gmail.co").status_code == 201
     response = register(client, password="short")
     assert response.status_code == 422
     assert "bytes" in response.json()["detail"]

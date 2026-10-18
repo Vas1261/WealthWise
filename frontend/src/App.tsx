@@ -11,19 +11,26 @@ import { ROUTES, ROUTE_TITLES, hrefFor, useRoute, type Route } from './route'
 
 type Health = { status: string; database: string }
 
+// The API answers but tables are missing, so pages that need them fail with a server error: say why.
+const MIGRATION_PENDING =
+  'The database is behind this version of the app, so some pages will fail. ' +
+  'In the backend folder run: .venv/bin/alembic upgrade head'
+
+/** Says nothing while the server is healthy; shows a warning only when it is not. */
 function HealthStatus() {
-  const [text, setText] = useState('Checking…')
+  const [problem, setProblem] = useState<string | null>(null)
 
   useEffect(() => {
     fetch('/health', { cache: 'no-store' })
       .then(async (response) => {
         const body = (await response.json()) as Health
-        setText(`API: ${body.status} · Database: ${body.database}`)
+        if (body.database === 'migration_pending') setProblem(MIGRATION_PENDING)
+        else if (body.status !== 'ok') setProblem('The server is running but cannot reach its database.')
       })
-      .catch(() => setText('Backend unreachable'))
+      .catch(() => setProblem('The WealthWise server cannot be reached. Start the backend and reload the page.'))
   }, [])
 
-  return <p className="health" data-testid="health">{text}</p>
+  return problem ? <p className="notice bad" role="alert" data-testid="health">{problem}</p> : null
 }
 
 function Page({ route, user, onUserChange }: { route: Route; user: User; onUserChange: (user: User) => void }) {

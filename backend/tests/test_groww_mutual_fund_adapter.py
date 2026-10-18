@@ -11,7 +11,7 @@ from app.adapters.base import BrokerAdapter, StatementFormatError
 from app.adapters.groww_equity import GrowwEquityAdapter
 from app.adapters.groww_mutual_fund import GrowwMutualFundAdapter
 from app.adapters.zerodha_equity import ZerodhaEquityAdapter
-from app.domain.holdings import NormalizedHolding
+from app.domain.holdings import CostDate, NormalizedHolding
 
 BATCH_ID = "batch-789"
 TITLE = "TRANSACTIONS FROM Jan 01 2025 TO Jun 30 2026"
@@ -218,8 +218,22 @@ def test_a_single_purchase_maps_to_normalized_holding(orders):
             instrument_name=ALPHA, isin=None, symbol=None, asset_class="mutual_fund",
             quantity=Decimal("7.375"), average_buy_price=Decimal("41.625"),
             native_currency="INR", source_broker="groww", import_batch_id=BATCH_ID,
+            cost_dates=(CostDate(date(2026, 1, 15), Decimal("306.984375")),),
         )
     ]
+
+
+def test_purchase_cost_is_kept_per_purchase_date_for_fx_pinning(orders):
+    rows = [
+        tx(units="10", nav="20", when="15 Mar 2026"),
+        tx(units="5", nav="22", when="15 Jan 2026"),
+        tx(units="2", nav="21", when="15 Jan 2026"),
+        tx(kind="REDEEM", units="4", nav="30", when="20 Mar 2026"),  # redemptions date nothing
+        tx(scheme=BETA, units="1", nav="0", when="01 Feb 2026"),  # zero cost: nothing to pin
+    ]
+    alpha, beta = parse(orders(rows)).holdings
+    assert alpha.cost_dates == (CostDate(date(2026, 1, 15), Decimal("152")), CostDate(date(2026, 3, 15), Decimal("200")))
+    assert beta.cost_dates == ()
 
 
 def test_b_multiple_purchases_weighted_by_units(orders):

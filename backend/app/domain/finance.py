@@ -63,6 +63,7 @@ class EntryRow:
     amount: Decimal
     currency: str
     entry_date: date
+    description: str | None = None  # only read for reports
 
 
 @dataclass(frozen=True)

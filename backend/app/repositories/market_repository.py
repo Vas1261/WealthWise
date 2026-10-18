@@ -1,9 +1,10 @@
-"""Persistence for the global market-data caches (SQLAlchemy only).
+"""Persistence for the global market price cache (SQLAlchemy only).
 
 Returns plain snapshots with timezone-aware UTC datetimes: SQLite drops tzinfo on read, and
 callers compare these timestamps with an aware `now`.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -11,24 +12,14 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.domain.market import SymbolCandidate, SymbolChoice, SymbolStatus
-from app.models import InstrumentSymbol, MarketPrice
-
-
-@dataclass(frozen=True)
-class SymbolMapping:
-    isin: str
-    status: SymbolStatus
-    symbol: str | None
-    mic_code: str | None
-    currency: str | None
-    checked_at: datetime
+from app.models import MarketPrice
 
 
 @dataclass(frozen=True)
 class CachedPrice:
-    symbol: str
-    mic_code: str
+    isin: str
+    exchange: str
+    trading_symbol: str | None
     price: Decimal
     currency: str
     fetched_at: datetime
@@ -38,52 +29,32 @@ def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
-def get_symbol_mapping(db: Session, isin: str) -> SymbolMapping | None:
-    row = db.execute(select(InstrumentSymbol).where(InstrumentSymbol.isin == isin)).scalar_one_or_none()
-    if row is None:
-        return None
-    return SymbolMapping(
-        row.isin, SymbolStatus(row.status), row.symbol, row.mic_code, row.currency, _utc(row.checked_at)
-    )
+def _snapshot(row: MarketPrice) -> CachedPrice:
+    return CachedPrice(row.isin, row.exchange, row.trading_symbol, row.price, row.currency, _utc(row.fetched_at))
 
 
-def save_symbol_mapping(db: Session, isin: str, choice: SymbolChoice, checked_at: datetime) -> SymbolMapping:
-    row = db.execute(select(InstrumentSymbol).where(InstrumentSymbol.isin == isin)).scalar_one_or_none()
-    if row is None:
-        row = InstrumentSymbol(isin=isin)
-        db.add(row)
-    candidate: SymbolCandidate | None = choice.candidate
-    row.status = choice.status.value
-    row.symbol = candidate.symbol if candidate else None
-    row.mic_code = candidate.mic_code if candidate else None
-    row.exchange = candidate.exchange if candidate else None
-    row.currency = candidate.currency if candidate else None
-    row.instrument_name = candidate.instrument_name if candidate else None
-    row.checked_at = checked_at
-    db.flush()
-    return SymbolMapping(isin, choice.status, row.symbol, row.mic_code, row.currency, _utc(checked_at))
-
-
-def get_cached_price(db: Session, symbol: str, mic_code: str) -> CachedPrice | None:
-    row = db.execute(
-        select(MarketPrice).where(MarketPrice.symbol == symbol, MarketPrice.mic_code == mic_code)
-    ).scalar_one_or_none()
-    if row is None:
-        return None
-    return CachedPrice(row.symbol, row.mic_code, row.price, row.currency, _utc(row.fetched_at))
+def get_cached_prices(db: Session, isins: Iterable[str]) -> dict[str, CachedPrice]:
+    """The cached price of each ISIN that has one."""
+    wanted = list(dict.fromkeys(isins))
+    if not wanted:
+        return {}
+    rows = db.execute(select(MarketPrice).where(MarketPrice.isin.in_(wanted))).scalars()
+    return {row.isin: _snapshot(row) for row in rows}
 
 
 def save_price(
-    db: Session, symbol: str, mic_code: str, price: Decimal, currency: str, fetched_at: datetime
+    db: Session, isin: str, exchange: str, trading_symbol: str | None, price: Decimal, currency: str,
+    fetched_at: datetime,
 ) -> CachedPrice:
-    row = db.execute(
-        select(MarketPrice).where(MarketPrice.symbol == symbol, MarketPrice.mic_code == mic_code)
-    ).scalar_one_or_none()
+    """Insert or replace the cached price of one ISIN."""
+    row = db.execute(select(MarketPrice).where(MarketPrice.isin == isin)).scalar_one_or_none()
     if row is None:
-        row = MarketPrice(symbol=symbol, mic_code=mic_code)
+        row = MarketPrice(isin=isin)
         db.add(row)
+    row.exchange = exchange
+    row.trading_symbol = trading_symbol
     row.price = price
     row.currency = currency
     row.fetched_at = fetched_at
     db.flush()
-    return CachedPrice(symbol, mic_code, price, currency, _utc(fetched_at))
+    return CachedPrice(isin, exchange, trading_symbol, price, currency, _utc(fetched_at))

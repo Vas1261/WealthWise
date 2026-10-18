@@ -1,4 +1,4 @@
-"""Market Service: real database + real client over a deterministic fake Twelve Data (no network)."""
+"""Market Service: real database + real client over a deterministic fake Upstox (no network)."""
 
 import inspect
 import logging
@@ -11,8 +11,8 @@ from pydantic import SecretStr
 
 from app.core.config import settings
 from app.core.database import SessionLocal
-from app.domain.market import PriceIssue, PriceStatus, RequestBudget, SymbolStatus
-from app.integrations.twelve_data import TwelveDataClient
+from app.domain.market import PriceIssue, PriceStatus
+from app.integrations.upstox import UpstoxClient
 from app.models import MarketPrice
 from app.repositories import market_repository
 from app.services import market_service
@@ -20,182 +20,137 @@ from app.services.market_service import InstrumentRef
 
 pytestmark = pytest.mark.usefixtures("migrated_db")
 
-FAKE_KEY = "unit-test-key-not-a-real-secret-0002"
+FAKE_TOKEN = "unit-test-token-not-a-real-secret-0002"
 T0 = datetime(2026, 6, 30, 10, 0, tzinfo=UTC)
-ISIN_A, ISIN_B = "INE000D01019", "INE000E01025"
-GROWW_A = InstrumentRef(ISIN_A, None, "equity")
-ZERODHA_A = InstrumentRef(ISIN_A, "SYNTHA", "equity")
-GROWW_B = InstrumentRef(ISIN_B, None, "equity")
-FUND = InstrumentRef(None, None, "mutual_fund")
-
-
-def listing(symbol, mic="XNSE"):
-    return {"symbol": symbol, "instrument_name": f"{symbol} Ltd", "exchange": {"XNSE": "NSE", "XBOM": "BSE"}[mic],
-            "mic_code": mic, "exchange_timezone": "Asia/Kolkata", "instrument_type": "Common Stock",
-            "country": "India", "currency": "INR"}
+ISIN_A, ISIN_B, ISIN_C = "INE000D01019", "INE000E01025", "INE000F01020"
+EQUITY_A = InstrumentRef(ISIN_A, "equity")
+EQUITY_B = InstrumentRef(ISIN_B, "equity")
+EQUITY_C = InstrumentRef(ISIN_C, "equity")
+FUND = InstrumentRef(None, "mutual_fund")
 
 
 def error(code, message="error"):
-    return httpx2.Response(code, json={"code": code, "message": message, "status": "error"})
+    return httpx2.Response(code, json={"status": "error", "errors": [{"errorCode": "UDAPI", "message": message}]})
 
 
-class FakeTwelveData:
-    """search: query -> list of listings | Response; prices: (symbol, mic) -> price str | Response | Exception."""
+class FakeUpstox:
+    """quotes: "SEGMENT|ISIN" -> (symbol, price) for listings that exist; failure: a Response or Exception
+    returned for every request instead (or None)."""
 
     def __init__(self):
-        self.search = {ISIN_A: [listing("SYNTHA"), listing("SYNTHA", "XBOM")], ISIN_B: [listing("SYNTHB")]}
-        self.prices = {("SYNTHA", "XNSE"): "101.25000", ("SYNTHB", "XNSE"): "55.50000"}
-        self.calls: list[tuple[str, dict]] = []
+        self.quotes = {
+            f"NSE_EQ|{ISIN_A}": ("SYNTHA", 101.25), f"BSE_EQ|{ISIN_A}": ("SYNTHA", 101.1),
+            f"BSE_EQ|{ISIN_B}": ("SYNTHB", 55.5),  # B trades on BSE only
+        }
+        self.failure: httpx2.Response | Exception | None = None
+        self.calls: list[list[str]] = []
 
     def handle(self, request: httpx2.Request) -> httpx2.Response:
-        params = dict(request.url.params)
-        self.calls.append((request.url.path, params))
-        if request.url.path == "/symbol_search":
-            outcome = self.search.get(params["symbol"], [])
-            return outcome if isinstance(outcome, httpx2.Response) else httpx2.Response(200, json={"data": outcome})
-        outcome = self.prices.get((params["symbol"], params["mic_code"]))
-        if isinstance(outcome, Exception):
-            raise outcome
-        if isinstance(outcome, httpx2.Response):
-            return outcome
-        return httpx2.Response(200, json={"price": outcome}) if outcome else error(404, "symbol not found")
+        keys = request.url.params["instrument_key"].split(",")
+        self.calls.append(keys)
+        if isinstance(self.failure, Exception):
+            raise self.failure
+        if self.failure is not None:
+            return self.failure
+        data = {}
+        for key in keys:
+            if key in self.quotes:
+                symbol, price = self.quotes[key]
+                data[f"{key.split('|')[0]}:{symbol}"] = {"last_price": price, "instrument_token": key,
+                                                          "ltq": 1, "volume": 10, "cp": price}
+        return httpx2.Response(200, json={"status": "success", "data": data})
 
-    def count(self, path):
-        return sum(1 for p, _ in self.calls if p == path)
+    def requested_isins(self) -> list[str]:
+        return [key.split("|")[1] for call in self.calls for key in call if key.startswith("NSE_EQ")]
 
 
 @pytest.fixture
 def market():
-    return FakeTwelveData()
+    return FakeUpstox()
 
 
 @pytest.fixture
 def client(market):
-    c = TwelveDataClient(SecretStr(FAKE_KEY), transport=httpx2.MockTransport(market.handle))
+    c = UpstoxClient(SecretStr(FAKE_TOKEN), transport=httpx2.MockTransport(market.handle))
     yield c
     c.close()
 
 
-def prices(client, instruments, *, at=T0, force=False, budget=None):
+def prices(client, instruments, *, at=T0, force=False):
     with SessionLocal() as db:
-        return market_service.get_prices(db, instruments, client=client, now=at, force_refresh=force,
-                                         budget=budget or RequestBudget(1000))
+        return market_service.get_prices(db, instruments, client=client, now=at, force_refresh=force)
 
 
-# --- Symbol resolution -------------------------------------------------------------------------
+# --- Listing choice ----------------------------------------------------------------------------------
 
-def test_isin_resolved_to_nse_listing_and_cached(client, market):
-    (result,) = prices(client, [GROWW_A])
-    assert (result.status, result.price, result.currency, result.issue) == (
-        PriceStatus.FRESH, Decimal("101.25000"), "INR", None)
+def test_nse_price_preferred_and_cached_with_its_exchange(client, market):
+    (result,) = prices(client, [EQUITY_A])
+    assert (result.status, result.price, result.currency, result.as_of, result.issue) == (
+        PriceStatus.FRESH, Decimal("101.25"), "INR", T0, None)
+    assert market.calls == [[f"NSE_EQ|{ISIN_A}", f"BSE_EQ|{ISIN_A}"]]  # both exchanges, one request
     with SessionLocal() as db:
-        mapping = market_repository.get_symbol_mapping(db, ISIN_A)
-    assert (mapping.status, mapping.symbol, mapping.mic_code) == (SymbolStatus.RESOLVED, "SYNTHA", "XNSE")
-    assert market.calls[0] == ("/symbol_search", {"symbol": ISIN_A, "show_plan": "true"})
+        cached = market_repository.get_cached_prices(db, [ISIN_A])[ISIN_A]
+    assert (cached.exchange, cached.trading_symbol, cached.price) == ("NSE", "SYNTHA", Decimal("101.25"))
 
 
-def test_cached_symbol_is_not_searched_again(client, market):
-    prices(client, [GROWW_A])
-    prices(client, [GROWW_A], at=T0 + timedelta(hours=1))  # price stale, mapping permanent
-    assert market.count("/symbol_search") == 1
-    assert market.count("/price") == 2
-
-
-@pytest.mark.parametrize("not_entitled", [error(403, "upgrade"), error(404, "available starting with the Grow plan")])
-def test_isin_search_outside_plan_falls_back_to_broker_ticker(client, market, not_entitled):
-    market.search[ISIN_A] = not_entitled
-    market.search["SYNTHA"] = [listing("SYNTHAB"), listing("SYNTHA")]
-    (result,) = prices(client, [ZERODHA_A])
-    assert (result.status, result.price) == (PriceStatus.FRESH, Decimal("101.25000"))
-    assert [p["symbol"] for _, p in market.calls if "show_plan" in p] == [ISIN_A, "SYNTHA"]
-
-
-def test_ticker_fallback_also_used_when_isin_search_finds_nothing(client, market):
-    market.search[ISIN_A] = []
-    market.search["SYNTHA"] = [listing("SYNTHA")]
-    assert prices(client, [ZERODHA_A])[0].status == PriceStatus.FRESH
-
-
-def test_groww_holding_borrows_ticker_from_zerodha_holding_of_same_isin(client, market):
-    market.search[ISIN_A] = error(403, "upgrade")
-    market.search["SYNTHA"] = [listing("SYNTHA")]
-    results = prices(client, [GROWW_A, ZERODHA_A])
-    assert results[0] == results[1] and results[0].status == PriceStatus.FRESH
-    assert (market.count("/symbol_search"), market.count("/price")) == (2, 1)  # one ISIN, priced once
-
-
-def test_isin_search_outside_plan_without_ticker_is_not_cached(client, market):
-    market.search[ISIN_A] = error(403, "upgrade")
-    (result,) = prices(client, [GROWW_A])
-    assert (result.status, result.issue) == (PriceStatus.UNAVAILABLE, PriceIssue.NOT_ENTITLED)
+def test_bse_price_used_when_not_listed_on_nse(client, market):
+    (result,) = prices(client, [EQUITY_B])
+    assert (result.status, result.price) == (PriceStatus.FRESH, Decimal("55.5"))
     with SessionLocal() as db:
-        assert market_repository.get_symbol_mapping(db, ISIN_A) is None
+        assert market_repository.get_cached_prices(db, [ISIN_B])[ISIN_B].exchange == "BSE"
 
 
-def test_no_candidate_is_cached_as_not_found_and_retried_after_seven_days(client, market):
-    market.search[ISIN_A] = []
-    assert prices(client, [GROWW_A])[0].issue == PriceIssue.SYMBOL_NOT_FOUND
-    prices(client, [GROWW_A], at=T0 + timedelta(days=6))
-    assert market.count("/symbol_search") == 1
-    market.search[ISIN_A] = [listing("SYNTHA")]
-    assert prices(client, [GROWW_A], at=T0 + timedelta(days=7))[0].status == PriceStatus.FRESH
-    assert market.count("/symbol_search") == 2
-
-
-def test_multiple_candidates_on_preferred_exchange_are_ambiguous(client, market):
-    market.search[ISIN_A] = [listing("SYNTHA"), listing("SYNTHZ")]
-    (result,) = prices(client, [GROWW_A])
-    assert (result.status, result.issue) == (PriceStatus.UNAVAILABLE, PriceIssue.SYMBOL_AMBIGUOUS)
-    assert market.count("/price") == 0
+def test_isin_on_neither_exchange_is_not_listed(client, market):
+    (result,) = prices(client, [EQUITY_C])
+    assert (result.status, result.price, result.issue) == (PriceStatus.UNAVAILABLE, None, PriceIssue.NOT_LISTED)
     with SessionLocal() as db:
-        assert market_repository.get_symbol_mapping(db, ISIN_A).status == SymbolStatus.AMBIGUOUS
+        assert market_repository.get_cached_prices(db, [ISIN_C]) == {}
 
 
-@pytest.mark.parametrize(
-    ("response", "issue"),
-    [(error(429), PriceIssue.RATE_LIMITED), (error(500), PriceIssue.SERVICE_UNAVAILABLE),
-     (httpx2.Response(200, text="<html>"), PriceIssue.INVALID_RESPONSE)],
-)
-def test_transient_search_failure_is_not_cached(client, market, response, issue):
-    market.search[ISIN_A] = response
-    assert prices(client, [GROWW_A])[0].issue == issue
-    with SessionLocal() as db:
-        assert market_repository.get_symbol_mapping(db, ISIN_A) is None
-    market.search[ISIN_A] = [listing("SYNTHA")]
-    assert prices(client, [GROWW_A], at=T0 + timedelta(seconds=5))[0].status == PriceStatus.FRESH
+def test_a_whole_portfolio_is_priced_in_one_request(client, market):
+    results = prices(client, [EQUITY_B, FUND, EQUITY_A, EQUITY_C, EQUITY_A])
+    assert len(market.calls) == 1
+    assert market.requested_isins() == [ISIN_B, ISIN_A, ISIN_C]  # each ISIN once, in first-seen order
+    assert [r.price for r in results] == [Decimal("55.5"), None, Decimal("101.25"), None, Decimal("101.25")]
 
 
-# --- Price cache -------------------------------------------------------------------------------
+# --- Price cache -------------------------------------------------------------------------------------
 
 def test_fresh_cache_hit_makes_no_request(client, market):
-    first = prices(client, [GROWW_A])[0]
-    second = prices(client, [GROWW_A], at=T0 + timedelta(minutes=9, seconds=59))[0]
-    assert second == first and second.as_of == T0
-    assert market.count("/price") == 1
+    first = prices(client, [EQUITY_A])[0]
+    second = prices(client, [EQUITY_A], at=T0 + timedelta(minutes=9, seconds=59))[0]
+    assert (second.status, second.price, second.as_of) == (PriceStatus.FRESH, first.price, T0)
+    assert len(market.calls) == 1
 
 
-def test_stale_cache_is_refreshed(client, market):
-    prices(client, [GROWW_A])
-    market.prices[("SYNTHA", "XNSE")] = "102.00000"
+def test_only_isins_without_a_fresh_price_are_requested(client, market):
+    prices(client, [EQUITY_A])
+    prices(client, [EQUITY_A, EQUITY_B], at=T0 + timedelta(minutes=1))
+    assert market.requested_isins() == [ISIN_A, ISIN_B]  # A once, then only B
+
+
+def test_expired_price_is_refreshed(client, market):
+    prices(client, [EQUITY_A])
+    market.quotes[f"NSE_EQ|{ISIN_A}"] = ("SYNTHA", 102)
     later = T0 + timedelta(minutes=10)
-    (result,) = prices(client, [GROWW_A], at=later)
-    assert (result.status, result.price, result.as_of) == (PriceStatus.FRESH, Decimal("102.00000"), later)
+    (result,) = prices(client, [EQUITY_A], at=later)
+    assert (result.status, result.price, result.as_of) == (PriceStatus.FRESH, Decimal("102"), later)
 
 
 def test_ttl_comes_from_configuration(client, market, monkeypatch):
     monkeypatch.setattr(settings, "market_price_ttl_minutes", 5)
-    prices(client, [GROWW_A])
-    prices(client, [GROWW_A], at=T0 + timedelta(minutes=5))
-    assert market.count("/price") == 2
+    prices(client, [EQUITY_A])
+    prices(client, [EQUITY_A], at=T0 + timedelta(minutes=5))
+    assert len(market.calls) == 2
 
 
 def test_forced_refresh_respects_sixty_second_floor(client, market):
-    prices(client, [GROWW_A])
-    prices(client, [GROWW_A], at=T0 + timedelta(seconds=30), force=True)
-    assert market.count("/price") == 1
-    market.prices[("SYNTHA", "XNSE")] = "103.00000"
-    (result,) = prices(client, [GROWW_A], at=T0 + timedelta(seconds=60), force=True)
-    assert (result.status, result.price, market.count("/price")) == (PriceStatus.FRESH, Decimal("103.00000"), 2)
+    prices(client, [EQUITY_A])
+    prices(client, [EQUITY_A], at=T0 + timedelta(seconds=30), force=True)
+    assert len(market.calls) == 1
+    market.quotes[f"NSE_EQ|{ISIN_A}"] = ("SYNTHA", 103)
+    (result,) = prices(client, [EQUITY_A], at=T0 + timedelta(seconds=60), force=True)
+    assert (result.status, result.price, len(market.calls)) == (PriceStatus.FRESH, Decimal("103"), 2)
 
 
 @pytest.mark.parametrize(
@@ -207,137 +162,105 @@ def test_forced_refresh_respects_sixty_second_floor(client, market):
         (error(429), PriceIssue.RATE_LIMITED),
         (error(401), PriceIssue.CREDENTIALS_REJECTED),
         (error(403), PriceIssue.NOT_ENTITLED),
+        (error(400), PriceIssue.REQUEST_REJECTED),
         (httpx2.Response(200, text="not json"), PriceIssue.INVALID_RESPONSE),
-        (httpx2.Response(200, json={}), PriceIssue.INVALID_RESPONSE),
-        (httpx2.Response(200, json={"price": "abc"}), PriceIssue.INVALID_RESPONSE),
-        (httpx2.Response(200, json={"price": "0"}), PriceIssue.INVALID_RESPONSE),
+        (httpx2.Response(200, json={"status": "success"}), PriceIssue.INVALID_RESPONSE),
     ],
-    ids=["timeout", "connection", "http-500", "rate-limit", "bad-key", "plan", "not-json", "no-price",
-         "non-numeric", "zero"],
+    ids=["timeout", "connection", "http-500", "rate-limit", "bad-token", "no-access", "bad-request", "not-json",
+         "no-data"],
 )
 def test_failed_refresh_serves_last_price_as_stale_or_unavailable(client, market, failure, issue):
+    prices(client, [EQUITY_A])
+    market.failure = failure
     later = T0 + timedelta(minutes=15)
-    prices(client, [GROWW_A])
-    market.prices[("SYNTHA", "XNSE")] = failure
-    stale = prices(client, [GROWW_A], at=later)[0]
-    assert (stale.status, stale.price, stale.as_of, stale.issue) == (PriceStatus.STALE, Decimal("101.25000"), T0, issue)
-
-    # Same failure with no cached price: B's symbol is resolved and cached, but its price is not.
-    assert prices(client, [GROWW_B], at=later)[0].status == PriceStatus.FRESH
-    with SessionLocal() as db:
-        db.query(MarketPrice).filter_by(symbol="SYNTHB").delete()
-        db.commit()
-    market.prices[("SYNTHB", "XNSE")] = failure
-    (missing,) = prices(client, [GROWW_B], at=later + timedelta(minutes=1))
+    stale, missing = prices(client, [EQUITY_A, EQUITY_B], at=later)
+    assert (stale.status, stale.price, stale.as_of, stale.issue) == (PriceStatus.STALE, Decimal("101.25"), T0, issue)
     assert (missing.status, missing.price, missing.as_of, missing.issue) == (PriceStatus.UNAVAILABLE, None, None, issue)
 
 
+def test_listing_that_disappears_keeps_its_last_price_as_stale(client, market):
+    prices(client, [EQUITY_A])
+    del market.quotes[f"NSE_EQ|{ISIN_A}"], market.quotes[f"BSE_EQ|{ISIN_A}"]
+    (result,) = prices(client, [EQUITY_A], at=T0 + timedelta(minutes=20))
+    assert (result.status, result.price, result.issue) == (PriceStatus.STALE, Decimal("101.25"), PriceIssue.NOT_LISTED)
+
+
 def test_stale_price_is_served_regardless_of_age(client, market):
-    prices(client, [GROWW_A])
-    market.prices[("SYNTHA", "XNSE")] = error(500)
-    (result,) = prices(client, [GROWW_A], at=T0 + timedelta(days=30))
+    prices(client, [EQUITY_A])
+    market.failure = error(500)
+    (result,) = prices(client, [EQUITY_A], at=T0 + timedelta(days=30))
     assert (result.status, result.as_of) == (PriceStatus.STALE, T0)
 
 
 def test_failed_refresh_does_not_overwrite_cache(client, market):
-    prices(client, [GROWW_A])
-    market.prices[("SYNTHA", "XNSE")] = error(500)
-    prices(client, [GROWW_A], at=T0 + timedelta(minutes=20))
+    prices(client, [EQUITY_A])
+    market.failure = error(500)
+    prices(client, [EQUITY_A], at=T0 + timedelta(minutes=20))
     with SessionLocal() as db:
-        cached = market_repository.get_cached_price(db, "SYNTHA", "XNSE")
-    assert (cached.price, cached.fetched_at) == (Decimal("101.25000"), T0)
+        cached = market_repository.get_cached_prices(db, [ISIN_A])[ISIN_A]
+    assert (cached.price, cached.fetched_at) == (Decimal("101.25"), T0)
 
 
-# --- Request budget (rate guard) ---------------------------------------------------------------
-
-def test_request_budget_defers_instead_of_exceeding_the_limit(client, market):
-    budget = RequestBudget(3)  # A: search + price; B: search; B's price would be the 4th request
-    results = prices(client, [GROWW_A, GROWW_B], budget=budget)
-    assert [r.status for r in results] == [PriceStatus.FRESH, PriceStatus.UNAVAILABLE]
-    assert results[1].issue == PriceIssue.REQUEST_BUDGET_EXHAUSTED
-    assert len(market.calls) == 3
-    (later_b,) = prices(client, [GROWW_B], at=T0 + timedelta(minutes=1), budget=budget)
-    assert later_b.status == PriceStatus.FRESH
-
-
-def test_exhausted_budget_still_serves_cached_prices(client, market):
-    prices(client, [GROWW_A])
-    (result,) = prices(client, [GROWW_A], at=T0 + timedelta(minutes=12), budget=RequestBudget(0 + 1))
-    assert result.status == PriceStatus.FRESH  # one request allowed
-    exhausted = RequestBudget(1)
-    exhausted.try_spend(T0 + timedelta(minutes=30))
-    (result,) = prices(client, [GROWW_A], at=T0 + timedelta(minutes=30), budget=exhausted)
-    assert (result.status, result.issue) == (PriceStatus.STALE, PriceIssue.REQUEST_BUDGET_EXHAUSTED)
-
-
-# --- Scope: mutual funds, missing ISIN, configuration, sharing ---------------------------------------
+# --- Scope: mutual funds, missing ISIN, configuration, sharing ----------------------------------------
 
 def test_mutual_funds_are_not_supported_and_never_requested(client, market):
-    results = prices(client, [FUND, InstrumentRef(None, None, "mutual_fund")])
+    results = prices(client, [FUND, InstrumentRef("INF000X01011", "mutual_fund")])
     assert all((r.status, r.issue) == (PriceStatus.NOT_SUPPORTED, PriceIssue.MUTUAL_FUND) for r in results)
     assert market.calls == []
 
 
 def test_equity_without_isin_is_unavailable(client, market):
-    (result,) = prices(client, [InstrumentRef(None, "SYNTHA", "equity")])
+    (result,) = prices(client, [InstrumentRef(None, "equity")])
     assert (result.status, result.issue) == (PriceStatus.UNAVAILABLE, PriceIssue.MISSING_ISIN)
     assert market.calls == []
-
-
-def test_results_follow_input_order_and_each_isin_is_priced_once(client, market):
-    results = prices(client, [GROWW_B, FUND, GROWW_A, ZERODHA_A, GROWW_B])
-    assert [r.price for r in results] == [Decimal("55.50000"), None, Decimal("101.25000"), Decimal("101.25000"),
-                                          Decimal("55.50000")]
-    assert market.count("/price") == 2
-
-
-def test_failed_refresh_is_not_repeated_for_duplicate_isins(client, market):
-    prices(client, [GROWW_A])
-    market.prices[("SYNTHA", "XNSE")] = error(500)
-    results = prices(client, [GROWW_A, ZERODHA_A, GROWW_A], at=T0 + timedelta(minutes=20))
-    assert {r.status for r in results} == {PriceStatus.STALE}
-    assert market.count("/price") == 2  # the initial fetch + one failed refresh, not three
 
 
 def test_cache_is_global_market_data_not_per_user(client, market):
     # Two users holding the same ISIN share one cached price; the service takes no user identity at all.
     assert "user" not in " ".join(inspect.signature(market_service.get_prices).parameters)
-    prices(client, [GROWW_A])
-    prices(client, [ZERODHA_A], at=T0 + timedelta(minutes=1))
-    assert market.count("/price") == 1
+    prices(client, [EQUITY_A])
+    prices(client, [EQUITY_A], at=T0 + timedelta(minutes=1))
+    assert len(market.calls) == 1
 
 
-def test_without_api_key_nothing_is_requested_and_cache_still_served(market, monkeypatch, client):
-    prices(client, [GROWW_A])  # cache a mapping and price first
-    monkeypatch.setattr(settings, "twelve_data_api_key", SecretStr(""))
+def test_without_token_nothing_is_requested_and_cache_still_served(market, monkeypatch, client):
+    prices(client, [EQUITY_A])  # cache a price first
+    monkeypatch.setattr(settings, "upstox_analytics_token", SecretStr(""))
     assert market_service.default_client() is None
     with SessionLocal() as db:
-        fresh, unknown = market_service.get_prices(db, [GROWW_A, GROWW_B], now=T0 + timedelta(minutes=1))
-        stale = market_service.get_prices(db, [GROWW_A], now=T0 + timedelta(minutes=20))[0]
+        fresh, unknown = market_service.get_prices(db, [EQUITY_A, EQUITY_B], now=T0 + timedelta(minutes=1))
+        stale = market_service.get_prices(db, [EQUITY_A], now=T0 + timedelta(minutes=20))[0]
     assert fresh.status == PriceStatus.FRESH
     assert (unknown.status, unknown.issue) == (PriceStatus.UNAVAILABLE, PriceIssue.NOT_CONFIGURED)
     assert (stale.status, stale.issue) == (PriceStatus.STALE, PriceIssue.NOT_CONFIGURED)
-    assert len(market.calls) == 2  # only the first, configured run made requests
+    assert len(market.calls) == 1  # only the first, configured run made a request
 
 
-def test_resolve_isins_for_import_service(client, market):
-    market.search[ISIN_B] = []
+def test_configured_token_is_used_by_default(market, monkeypatch):
+    monkeypatch.setattr(settings, "upstox_analytics_token", SecretStr(FAKE_TOKEN))
+    real_client = UpstoxClient
+    monkeypatch.setattr(market_service, "UpstoxClient",
+                        lambda token: real_client(token, transport=httpx2.MockTransport(market.handle)))
     with SessionLocal() as db:
-        resolved = market_service.resolve_isins(db, [GROWW_A, GROWW_B, FUND], client=client, now=T0,
-                                                budget=RequestBudget(10))
-    assert set(resolved) == {ISIN_A, ISIN_B}
-    assert (resolved[ISIN_A].status, resolved[ISIN_A].symbol) == (SymbolStatus.RESOLVED, "SYNTHA")
-    assert resolved[ISIN_B].status == SymbolStatus.NOT_FOUND
-    assert market.count("/price") == 0
+        (result,) = market_service.get_prices(db, [EQUITY_A], now=T0)
+    assert result.status == PriceStatus.FRESH and len(market.calls) == 1
 
 
-# --- Secret hygiene ----------------------------------------------------------------------------
+# --- Secret hygiene ----------------------------------------------------------------------------------
 
-def test_failures_log_issue_codes_only_never_the_key(client, market, caplog):
+def test_failures_log_issue_codes_only_never_the_token(client, market, caplog):
     caplog.set_level(logging.DEBUG)
-    prices(client, [GROWW_A])
-    market.prices[("SYNTHA", "XNSE")] = error(401, f"bad key {FAKE_KEY}")
-    prices(client, [GROWW_A], at=T0 + timedelta(minutes=20))
+    market.failure = error(401, f"bad token {FAKE_TOKEN}")
+    prices(client, [EQUITY_A])
     assert "credentials_rejected" in caplog.text
-    assert FAKE_KEY not in caplog.text
-    assert "bad key" not in caplog.text
+    assert FAKE_TOKEN not in caplog.text
+    assert "bad token" not in caplog.text
+
+
+def test_price_rows_hold_no_user_data(client, market):
+    prices(client, [EQUITY_A])
+    with SessionLocal() as db:
+        row = db.query(MarketPrice).one()
+    assert set(MarketPrice.__table__.columns.keys()) == {
+        "id", "isin", "exchange", "trading_symbol", "price", "currency", "fetched_at"}
+    assert row.isin == ISIN_A

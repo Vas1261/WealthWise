@@ -88,6 +88,17 @@ def list_cash_rows(db: Session, user_id: int) -> list[EntryRow]:
     return [EntryRow(*row) for row in rows]
 
 
+def list_entries_between(db: Session, user_id: int, start: date, end_exclusive: date | None) -> list[EntryRow]:
+    """Every entry of the user in [start, end_exclusive), with descriptions, oldest first (monthly report)."""
+    query = select(
+        FinanceEntry.kind, FinanceEntry.category, FinanceEntry.amount, FinanceEntry.currency, FinanceEntry.entry_date,
+        FinanceEntry.description,
+    ).where(FinanceEntry.user_id == user_id, FinanceEntry.entry_date >= start)
+    if end_exclusive is not None:
+        query = query.where(FinanceEntry.entry_date < end_exclusive)
+    return [EntryRow(*row) for row in db.execute(query.order_by(FinanceEntry.entry_date, FinanceEntry.id)).all()]
+
+
 def list_expenses_between(db: Session, user_id: int, start: date, end_exclusive: date | None) -> list[EntryRow]:
     query = select(
         FinanceEntry.kind, FinanceEntry.category, FinanceEntry.amount, FinanceEntry.currency, FinanceEntry.entry_date

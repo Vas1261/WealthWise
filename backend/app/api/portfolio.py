@@ -18,7 +18,7 @@ from app.api.formatting import MONEY_PLACES, PERCENT_PLACES, PRICE_PLACES, RATE_
 from app.api.formatting import fixed as _fixed
 from app.core.database import get_session
 from app.domain.fx import FxRate
-from app.domain.portfolio import CurrencyTotals, HoldingValuation, Money, PortfolioSummary, ReportingTotals
+from app.domain.portfolio import CurrencyTotals, HoldingValuation, Money, PortfolioSummary, ReportingTotals, pin_dates
 from app.models import User
 from app.services import portfolio_service
 
@@ -55,13 +55,19 @@ class FxRateOut(BaseModel):
     currency: str  # the native currency converted from
     rate: str | None  # units of the reporting currency per one unit of `currency`
     rate_date: date | None
-    status: str  # identity | fresh | stale | unavailable
+    status: str  # identity | fresh | stale | historical | unavailable
     issue: str | None
 
 
 class ReportingTotalsOut(TotalsOut):
     fx_rates: list[FxRateOut]
     fx_stale: bool
+    # Pinned FX (FR-20); null when a pinned rate is missing (see PortfolioOut.pinned_fx_unavailable).
+    invested_value_pinned: str | None  # cost at the rates of the dates it was paid on
+    priced_invested_value_pinned: str | None
+    currency_gain: str | None  # priced cost at today's rate minus at pinned rates
+    total_gain: str | None  # current value minus priced cost at pinned rates = unrealized_pnl + currency_gain
+    total_gain_pct: str | None
 
 
 class HoldingOut(BaseModel):
@@ -85,6 +91,11 @@ class HoldingOut(BaseModel):
     unrealized_pnl: str | None
     unrealized_pnl_pct: str | None
     cost_floor_value: str | None
+    pinned_fx_rate: str | None  # native -> reporting currency at the cost dates' rates (FR-20)
+    pinned_cost: str | None  # invested value in the reporting currency at that rate
+    cost_dates_from: date  # first and last date the cost is pinned to (the statement date if none stored)
+    cost_dates_to: date
+    cost_date_count: int
 
 
 class PortfolioOut(BaseModel):
@@ -92,6 +103,7 @@ class PortfolioOut(BaseModel):
     reporting_totals: ReportingTotalsOut | None
     fx_required: bool
     fx_unavailable: list[str]
+    pinned_fx_unavailable: list[str]
     contains_stale_prices: bool
     oldest_price_as_of: datetime | None
     totals_by_currency: dict[str, TotalsOut]
@@ -151,11 +163,17 @@ def _reporting(t: ReportingTotals) -> ReportingTotalsOut:
         oldest_price_as_of=t.oldest_price_as_of,
         fx_rates=[_fx_rate(currency, rate) for currency, rate in t.fx_rates.items()],
         fx_stale=t.fx_stale,
+        invested_value_pinned=_money(t.invested_value_pinned),
+        priced_invested_value_pinned=_money(t.priced_invested_value_pinned),
+        currency_gain=_money(t.currency_gain),
+        total_gain=_money(t.total_gain),
+        total_gain_pct=_fixed(t.total_gain_pct, PERCENT_PLACES),
     )
 
 
 def _holding(v: HoldingValuation) -> HoldingOut:
     p = v.position
+    dates = pin_dates(p)
     return HoldingOut(
         holding_id=p.holding_id,
         instrument_name=p.instrument_name,
@@ -177,6 +195,11 @@ def _holding(v: HoldingValuation) -> HoldingOut:
         unrealized_pnl=_money(v.unrealized_pnl),
         unrealized_pnl_pct=_fixed(v.unrealized_pnl_pct, PERCENT_PLACES),
         cost_floor_value=_money(v.cost_floor_value),
+        pinned_fx_rate=_fixed(v.pinned_rate, RATE_PLACES),
+        pinned_cost=_money(v.pinned_cost),
+        cost_dates_from=min(d.on for d in dates),
+        cost_dates_to=max(d.on for d in dates),
+        cost_date_count=len(dates),
     )
 
 
@@ -186,6 +209,7 @@ def _portfolio(summary: PortfolioSummary) -> PortfolioOut:
         reporting_totals=_reporting(summary.reporting_totals) if summary.reporting_totals else None,
         fx_required=summary.fx_required,
         fx_unavailable=summary.fx_unavailable,
+        pinned_fx_unavailable=summary.pinned_fx_unavailable,
         contains_stale_prices=summary.contains_stale_prices,
         oldest_price_as_of=summary.oldest_price_as_of,
         totals_by_currency={c: _totals(t) for c, t in summary.totals_by_currency.items()},

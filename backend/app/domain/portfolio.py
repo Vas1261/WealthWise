@@ -19,16 +19,23 @@ multiplied by its rate into the reporting currency (holdings and breakdowns stay
 P&L compares converted priced current value with converted priced cost, both at today's rate (no
 separate FX gain/loss). The mutual-fund cost floor is converted separately and never joins current
 value. If any needed rate is unusable there is no converted total at all (never a partial one).
+
+Pinned FX (FR-20): each holding's cost is also converted at the rates of the dates it was paid on (its
+cost dates, weighted by amount; without cost dates, its statement date), and those historical rates
+never change afterwards. That splits the converted gain into a market gain (price change, today's rate:
+the converted P&L above) and a currency gain (today's rate against the pinned rates, on the priced
+cost): total gain = converted current value - priced cost at pinned rates. If any pinned rate is
+missing, no pinned figure is given at all.
 """
 
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
 
-from app.domain.fx import FxRate, FxStatus, identity_rate
-from app.domain.holdings import ASSET_CLASS_MUTUAL_FUND
+from app.domain.fx import ONE, FxRate, FxStatus, identity_rate
+from app.domain.holdings import ASSET_CLASS_MUTUAL_FUND, CostDate, effective_cost_dates
 from app.domain.market import PriceIssue, PriceResult, PriceStatus
 
 # 60 significant digits keep products of two Numeric(20,6) values (at most 40 digits) and their sums
@@ -64,6 +71,7 @@ class HoldingPosition:
     average_buy_price: Decimal
     statement_date: date
     import_batch_id: str
+    cost_dates: tuple[CostDate, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -83,6 +91,8 @@ class HoldingValuation:
     unrealized_pnl: Money | None
     unrealized_pnl_pct: Decimal | None
     cost_floor_value: Money | None  # mutual funds only: the cost basis as a labelled floor
+    pinned_rate: Decimal | None = None  # native -> reporting currency at the cost dates' rates (FR-20)
+    pinned_cost: Money | None = None  # invested value at the pinned rate, in the reporting currency
 
     @property
     def priced(self) -> bool:
@@ -139,6 +149,12 @@ class ReportingTotals:
     contains_stale_prices: bool
     oldest_price_as_of: datetime | None
     fx_rates: dict[str, FxRate]  # native currency -> rate into the reporting currency
+    # Pinned FX (FR-20); all None when a pinned rate is missing.
+    invested_value_pinned: Decimal | None = None  # all holdings' cost at the rates of their cost dates
+    priced_invested_value_pinned: Decimal | None = None  # the same for priced holdings only
+    currency_gain: Decimal | None = None  # priced cost at today's rate - at pinned rates
+    total_gain: Decimal | None = None  # current value - priced cost at pinned rates (market + currency gain)
+    total_gain_pct: Decimal | None = None
 
     @property
     def fx_stale(self) -> bool:
@@ -155,6 +171,7 @@ class PortfolioSummary:
     reporting_totals: ReportingTotals | None  # None when there are no holdings or a needed rate is unusable
     fx_required: bool  # holdings in another currency than the reporting currency
     fx_unavailable: list[str]  # native currencies whose rate into the reporting currency is unusable
+    pinned_fx_unavailable: list[str] = field(default_factory=list)  # currencies missing a pinned rate
 
     @property
     def contains_stale_prices(self) -> bool:
@@ -239,12 +256,19 @@ def summarize(
     valuations: Sequence[HoldingValuation],
     reporting_currency: str,
     fx_rates: Mapping[str, FxRate] | None = None,
+    pinned_rates: Mapping[str, Mapping[date, FxRate]] | None = None,
 ) -> PortfolioSummary:
     """fx_rates: native currency -> rate into reporting_currency. The reporting currency itself always
-    converts at exactly 1; any other currency without a usable rate leaves reporting_totals None."""
+    converts at exactly 1; any other currency without a usable rate leaves reporting_totals None.
+    pinned_rates: native currency -> cost date -> historical rate into reporting_currency (None: no pinning)."""
     by_currency = _totals_by(valuations, lambda v: "all")["all"] if valuations else {}
     currencies = set(by_currency)
     reporting_totals, fx_unavailable = convert_totals(by_currency, fx_rates or {}, reporting_currency)
+    pinned_unavailable: list[str] = []
+    if pinned_rates is not None:
+        valuations, pinned_unavailable = pin_costs(valuations, reporting_currency, pinned_rates)
+        if reporting_totals is not None and not pinned_unavailable:
+            reporting_totals = _with_pinned_totals(reporting_totals, valuations)
     return PortfolioSummary(
         holdings=list(valuations),
         totals_by_currency=by_currency,
@@ -254,6 +278,63 @@ def summarize(
         reporting_totals=reporting_totals,
         fx_required=bool(currencies - {reporting_currency}),
         fx_unavailable=fx_unavailable,
+        pinned_fx_unavailable=pinned_unavailable,
+    )
+
+
+def pin_dates(position: HoldingPosition) -> tuple[CostDate, ...]:
+    return effective_cost_dates(position.cost_dates, position.statement_date)
+
+
+def pinned_rate(dates: Sequence[CostDate], rates: Mapping[date, FxRate]) -> Decimal | None:
+    """Amount-weighted average of the rates of the given dates; None if any of them has no usable rate."""
+    total = sum((d.amount for d in dates), ZERO)
+    if total <= ZERO or any(d.on not in rates or not rates[d.on].usable for d in dates):
+        return None
+    with localcontext(CALCULATION_CONTEXT):
+        return sum((d.amount * _rate(rates[d.on]) for d in dates), ZERO) / total
+
+
+def pin_costs(
+    valuations: Sequence[HoldingValuation],
+    reporting_currency: str,
+    pinned_rates: Mapping[str, Mapping[date, FxRate]],
+) -> tuple[list[HoldingValuation], list[str]]:
+    """Each valuation with its cost at pinned rates, and the native currencies missing a pinned rate."""
+    pinned: list[HoldingValuation] = []
+    missing: set[str] = set()
+    for valuation in valuations:
+        currency = valuation.invested_value.currency
+        rate = ONE if currency == reporting_currency else pinned_rate(
+            pin_dates(valuation.position), pinned_rates.get(currency, {})
+        )
+        if rate is None:
+            missing.add(currency)
+            pinned.append(valuation)
+            continue
+        with localcontext(CALCULATION_CONTEXT):
+            cost = valuation.invested_value.amount * rate
+        pinned.append(replace(valuation, pinned_rate=rate, pinned_cost=Money(cost, reporting_currency)))
+    return pinned, sorted(missing)
+
+
+def _with_pinned_totals(totals: ReportingTotals, valuations: Sequence[HoldingValuation]) -> ReportingTotals:
+    with localcontext(CALCULATION_CONTEXT):
+        invested = sum((_amount(v.pinned_cost.amount if v.pinned_cost else None) for v in valuations), ZERO)
+        priced = sum(
+            (_amount(v.pinned_cost.amount if v.pinned_cost else None) for v in valuations if v.priced), ZERO
+        )
+        current = totals.current_value
+        currency_gain = totals.priced_invested_value - priced if current is not None else None
+        total_gain = current - priced if current is not None else None
+        pct = total_gain / priced * HUNDRED if total_gain is not None and priced != ZERO else None
+    return replace(
+        totals,
+        invested_value_pinned=invested,
+        priced_invested_value_pinned=priced,
+        currency_gain=currency_gain,
+        total_gain=total_gain,
+        total_gain_pct=pct,
     )
 
 

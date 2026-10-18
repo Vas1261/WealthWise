@@ -8,6 +8,17 @@
   --bad: #c2312f;
   --info: #2f5fa8;
   --focus: #2f6fdb;
+  /* Chart colours (validated light/dark steps; categorical slots in fixed order, blue/red for gain/loss). */
+  --chart-series-1: #2a78d6;
+  --chart-series-2: #eb6834;
+  --chart-series-3: #1baf7a;
+  --chart-gain: #2a78d6;
+  --chart-loss: #e34948;
+  --chart-total: #898781;
+  --chart-text: #52514e;
+  --chart-muted: #898781;
+  --chart-grid: #e1e0d9;
+  --chart-surface: #ffffff;
   line-height: 1.45;
 }
 
@@ -18,7 +29,40 @@
     --bad: #ff7b72;
     --info: #79a8ff;
     --focus: #79a8ff;
+    --chart-series-1: #3987e5;
+    --chart-series-2: #d95926;
+    --chart-series-3: #199e70;
+    --chart-gain: #3987e5;
+    --chart-loss: #e66767;
+    --chart-total: #898781;
+    --chart-text: #c3c2b7;
+    --chart-grid: #2c2c2a;
+    --chart-surface: #121212;
   }
+}
+
+/* Charts: always beside a table ("Show the numbers"), never instead of one. */
+.chart {
+  margin: 1rem 0 1.5rem;
+}
+
+.chart figcaption {
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+}
+
+.chart-canvas {
+  position: relative;
+  width: 100%;
+}
+
+.chart details {
+  margin-top: 0.5rem;
+}
+
+button[aria-pressed='true'] {
+  font-weight: 600;
+  outline: 2px solid var(--focus);
 }
 
 body {

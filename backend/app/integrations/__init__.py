@@ -1,1 +1,1 @@
-"""Clients for external services (Twelve Data). Called only by the service layer."""
+"""Clients for external services (Upstox, Frankfurter). Called only by the service layer."""

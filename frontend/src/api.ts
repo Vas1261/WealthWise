@@ -10,6 +10,7 @@ import type {
   EntryInput,
   ImportAttempt,
   ImportOutcome,
+  MonthPoint,
   NetWorth,
   Portfolio,
   User,
@@ -95,7 +96,8 @@ async function errorFrom(response: Response): Promise<ApiError> {
   return new ApiError(response.status, message, code, body)
 }
 
-export async function request<T>(method: string, path: string, body?: Body): Promise<T> {
+/** Sends the request; on 401 refreshes the session once and retries. Throws ApiError unless the response is OK. */
+async function authorized(method: string, path: string, body?: Body): Promise<Response> {
   let response = await send(method, path, body)
   if (response.status === 401 && !NO_REFRESH_RETRY.has(path)) {
     if (await refreshSession()) {
@@ -104,7 +106,24 @@ export async function request<T>(method: string, path: string, body?: Body): Pro
     if (response.status === 401) sessionEndedHandler?.()
   }
   if (!response.ok) throw await errorFrom(response)
+  return response
+}
+
+export async function request<T>(method: string, path: string, body?: Body): Promise<T> {
+  const response = await authorized(method, path, body)
   return (response.status === 204 ? undefined : await response.json()) as T
+}
+
+/** Downloads a file response and saves it under the file name the server gave it. */
+export async function download(path: string): Promise<void> {
+  const response = await authorized('GET', path)
+  const name = /filename="([^"]+)"/.exec(response.headers.get('Content-Disposition') ?? '')?.[1] ?? 'wealthwise-report'
+  const url = URL.createObjectURL(await response.blob())
+  const link = document.createElement('a')
+  link.href = url
+  link.download = name
+  link.click()
+  URL.revokeObjectURL(url)
 }
 
 function query(params: Record<string, string | undefined>): string {
@@ -149,4 +168,13 @@ export const finance = {
   deleteBudget: (id: number) => request<void>('DELETE', `/api/finance/budgets/${id}`),
   budgetSummary: (month: string) => request<BudgetSummary>('GET', `/api/finance/budgets/summary${query({ month })}`),
   netWorth: () => request<NetWorth>('GET', '/api/finance/net-worth'),
+  monthlyTotals: (end: string, months = 12) =>
+    request<MonthPoint[]>('GET', `/api/finance/monthly-totals${query({ end, months: String(months) })}`),
+}
+
+export type ReportFormat = 'pdf' | 'csv'
+
+export const reports = {
+  monthly: (month: string, format: ReportFormat) => download(`/api/reports/monthly${query({ month, format })}`),
+  portfolio: (format: ReportFormat) => download(`/api/reports/portfolio${query({ format })}`),
 }

@@ -14,11 +14,11 @@ os.environ["APP_ENV"] = "test"
 os.environ["JWT_SECRET"] = "test-secret-" + "x" * 40
 # The test client talks plain HTTP, which never sends Secure cookies back.
 os.environ["COOKIE_SECURE"] = "false"
-# Offline by default: blank the Twelve Data key so no test can use the real one from .env or reach
-# the network. Only an explicit live run (RUN_LIVE_TWELVE_DATA=1) keeps the configured key.
-LIVE_TWELVE_DATA = os.environ.get("RUN_LIVE_TWELVE_DATA") == "1"
-if not LIVE_TWELVE_DATA:
-    os.environ["TWELVE_DATA_API_KEY"] = ""
+# Offline by default: blank the Upstox token so no test can use the real one from .env or reach
+# the network. Only an explicit live run (RUN_LIVE_UPSTOX=1) keeps the configured token.
+LIVE_UPSTOX = os.environ.get("RUN_LIVE_UPSTOX") == "1"
+if not LIVE_UPSTOX:
+    os.environ["UPSTOX_ANALYTICS_TOKEN"] = ""
 # Frankfurter needs no key, so disable FX outright unless an explicit live run asks for it.
 LIVE_FRANKFURTER = os.environ.get("RUN_LIVE_FRANKFURTER") == "1"
 if not LIVE_FRANKFURTER:
@@ -29,9 +29,10 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 def pytest_configure(config):
     config.addinivalue_line(
-        "markers", "live_twelve_data: calls the real Twelve Data API; needs RUN_LIVE_TWELVE_DATA=1 and a key"
+        "markers", "live_upstox: calls the real Upstox API; needs RUN_LIVE_UPSTOX=1 and a token"
     )
     config.addinivalue_line("markers", "live_frankfurter: calls the real Frankfurter API; needs RUN_LIVE_FRANKFURTER=1")
+    config.addinivalue_line("markers", "performance: timed NFR-01/NFR-02 checks; needs RUN_PERFORMANCE=1")
 
 
 @pytest.fixture

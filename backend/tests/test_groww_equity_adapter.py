@@ -134,8 +134,9 @@ def test_closing_price_and_statement_pnl_are_not_holding_values(statement):
     assert holding.average_buy_price == Decimal("31.45")  # 'Average buy price', not 'Closing price' (9.5)
     assert {f.name for f in fields(NormalizedHolding)} == {
         "instrument_name", "isin", "symbol", "asset_class", "quantity",
-        "average_buy_price", "native_currency", "source_broker", "import_batch_id",
+        "average_buy_price", "native_currency", "source_broker", "import_batch_id", "cost_dates",
     }
+    assert holding.cost_dates == ()  # equity cost dates come from the import service, not the file
 
 
 def test_symbol_is_not_invented_from_stock_name(statement):

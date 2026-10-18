@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { ApiError, auth, finance, imports, onSessionEnded, portfolio, request } from './api'
+import { ApiError, auth, finance, imports, onSessionEnded, portfolio, reports, request } from './api'
 import { CSRF, fakeApi } from './test/fakeApi'
 
 describe('CSRF and request options', () => {
@@ -167,5 +167,43 @@ describe('errors', () => {
   it('returns undefined for 204 responses', async () => {
     fakeApi({ 'DELETE /api/finance/budgets/1': { status: 204 } })
     await expect(finance.deleteBudget(1)).resolves.toBeUndefined()
+  })
+})
+
+describe('report downloads', () => {
+  function stubDownloads() {
+    const saved: { name: string; type: string }[] = []
+    vi.stubGlobal('URL', Object.assign(URL, {
+      createObjectURL: vi.fn((blob: Blob) => `blob:${blob.type}`),
+      revokeObjectURL: vi.fn(),
+    }))
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      saved.push({ name: this.download, type: this.href.replace('blob:', '') })
+    })
+    return saved
+  }
+
+  it('saves the file under the name the server gave it, after refreshing an expired session', async () => {
+    const saved = stubDownloads()
+    const file = () => new Response('%PDF-1.4', {
+      headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment; filename="wealthwise-monthly-2026-10.pdf"' },
+    })
+    const api = fakeApi({
+      'GET /api/reports/monthly': [{ status: 401, body: { detail: 'Not authenticated' } }, file()],
+      'POST /api/auth/refresh': { status: 204 },
+    })
+    await reports.monthly('2026-10', 'pdf')
+    expect(api.apiCalls().map((c) => `${c.method} ${c.url}`)).toEqual([
+      'GET /api/reports/monthly?month=2026-10&format=pdf', 'POST /api/auth/refresh',
+      'GET /api/reports/monthly?month=2026-10&format=pdf',
+    ])
+    expect(saved).toEqual([{ name: 'wealthwise-monthly-2026-10.pdf', type: 'application/pdf' }])
+  })
+
+  it('throws the backend error and saves nothing when the report fails', async () => {
+    const saved = stubDownloads()
+    fakeApi({ 'GET /api/reports/portfolio': { status: 409, body: { detail: 'Stored zerodha equity holdings are invalid' } } })
+    await expect(reports.portfolio('csv')).rejects.toMatchObject({ status: 409 })
+    expect(saved).toEqual([])
   })
 })

@@ -21,7 +21,9 @@ describe('source guards', () => {
   })
 
   it('never converts values with Number() or parseFloat()/parseInt()', () => {
-    expect(offenders(/\b(Number|parseFloat|parseInt)\s*\(/)).toEqual([])
+    // chartData.ts is the one exception, in exactly one place: plot() turns a string into a float to position marks.
+    expect(offenders(/\b(Number|parseFloat|parseInt)\s*\(/)).toEqual(['./chartData.ts'])
+    expect(sources['./chartData.ts'].match(/\b(Number|parseFloat|parseInt)\s*\(/g)).toEqual(['Number('])
     expect(offenders(/\bNumber\.parse/)).toEqual([])
   })
 

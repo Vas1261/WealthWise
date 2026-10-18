@@ -10,11 +10,20 @@ snapshot rules (decision B2) for user + broker + asset class + statement date:
   snapshot and is stored.
 Every attempt, including failed and rejected ones, is recorded in import history (ImportAttempt),
 which is separate from the snapshot table. The user id always comes from the authenticated caller.
+
+FX pinning (FR-20): each stored holding records the dates its cost was paid on. Mutual funds get them
+from their order history; an equity carries its dates over from the same ISIN in the previous statement
+of that broker, with only newly added cost dated to this statement (domain carry_cost_dates). After the
+import, the historical rates of those dates into the user's reporting currency are pinned (best effort:
+if the FX service is unreachable, the portfolio pins them when it is next viewed).
 """
 
 import uuid
+from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date
+from decimal import Decimal
 from enum import StrEnum
 from pathlib import PureWindowsPath
 from typing import NoReturn
@@ -25,9 +34,18 @@ from app.adapters.base import BrokerAdapter, StatementFormatError
 from app.adapters.groww_equity import GrowwEquityAdapter
 from app.adapters.groww_mutual_fund import GrowwMutualFundAdapter
 from app.adapters.zerodha_equity import ZerodhaEquityAdapter
-from app.domain.holdings import ASSET_CLASS_EQUITY, ASSET_CLASS_MUTUAL_FUND, RowError
+from app.domain.holdings import (
+    ASSET_CLASS_EQUITY,
+    ASSET_CLASS_MUTUAL_FUND,
+    CostDate,
+    NormalizedHolding,
+    RowError,
+    carry_cost_dates,
+    effective_cost_dates,
+)
 from app.models import ImportAttempt
-from app.repositories import import_repository
+from app.repositories import import_repository, user_repository
+from app.services import fx_service
 
 # Each adapter handles exactly one broker + asset class.
 ADAPTERS: tuple[tuple[BrokerAdapter, str, str], ...] = (
@@ -36,6 +54,7 @@ ADAPTERS: tuple[tuple[BrokerAdapter, str, str], ...] = (
     (GrowwMutualFundAdapter(), "groww", ASSET_CLASS_MUTUAL_FUND),
 )
 MAX_FILE_NAME_LENGTH = 255
+ZERO = Decimal(0)
 
 
 class ImportResult(StrEnum):
@@ -115,6 +134,10 @@ def import_statement(db: Session, user_id: int, file_path: str, file_name: str) 
     if existing is not None:
         import_repository.delete_batch(db, existing)
     latest = import_repository.latest_statement_date(db, user_id, broker, asset_class)
+    holdings = parsed.holdings
+    if asset_class == ASSET_CLASS_EQUITY:
+        previous = import_repository.previous_snapshot(db, user_id, broker, asset_class, parsed.statement_date)
+        holdings = _with_carried_cost_dates(holdings, previous, parsed.statement_date)
     import_repository.create_batch(
         db,
         batch_id=batch_id,
@@ -125,7 +148,7 @@ def import_statement(db: Session, user_id: int, file_path: str, file_name: str) 
         file_name=name,
         rows_succeeded=outcome.rows_succeeded,
         rows_failed=outcome.rows_failed,
-        holdings=parsed.holdings,
+        holdings=holdings,
     )
     is_current = latest is None or parsed.statement_date >= latest
     outcome = replace(
@@ -136,12 +159,59 @@ def import_statement(db: Session, user_id: int, file_path: str, file_name: str) 
     )
     attempt = _record(db, user_id, outcome)
     db.commit()
+    _pin_rates(db, user_id, holdings, parsed.statement_date)
     return replace(outcome, attempt_id=attempt.id)
 
 
 def list_history(db: Session, user_id: int) -> list[ImportAttempt]:
     """The user's import attempts, newest first (read-only; Module 10 import history)."""
     return list(reversed(import_repository.list_attempts(db, user_id)))
+
+
+def _with_carried_cost_dates(
+    holdings: Sequence[NormalizedHolding],
+    previous: tuple[date, list[NormalizedHolding]] | None,
+    statement_date: date,
+) -> list[NormalizedHolding]:
+    """Equity cost dates carried over from the previous statement, matched by ISIN. An ISIN listed twice in
+    either statement is ambiguous, so its cost is dated to this statement only."""
+    earlier: dict[str, tuple[NormalizedHolding, tuple[CostDate, ...]]] = {}
+    if previous is not None:
+        previous_date, previous_holdings = previous
+        listed = Counter(h.isin for h in previous_holdings)
+        earlier = {
+            h.isin: (h, effective_cost_dates(h.cost_dates, previous_date))
+            for h in previous_holdings
+            if h.isin and listed[h.isin] == 1
+        }
+    listed = Counter(h.isin for h in holdings)
+    carried = []
+    for holding in holdings:
+        match = earlier.get(holding.isin) if holding.isin and listed[holding.isin] == 1 else None
+        before, before_dates = match if match else (None, ())
+        carried.append(replace(holding, cost_dates=carry_cost_dates(
+            before_dates,
+            before.quantity if before else ZERO,
+            before.quantity * before.average_buy_price if before else ZERO,
+            holding.quantity,
+            holding.quantity * holding.average_buy_price,
+            statement_date,
+        )))
+    return carried
+
+
+def _pin_rates(db: Session, user_id: int, holdings: Sequence[NormalizedHolding], statement_date: date) -> None:
+    """Pin the rates of the stored holdings' cost dates into the user's reporting currency (FR-20)."""
+    user = user_repository.get_by_id(db, user_id)
+    if user is None:
+        return
+    dates: dict[str, set[date]] = {}
+    for holding in holdings:
+        dates.setdefault(holding.native_currency, set()).update(
+            d.on for d in effective_cost_dates(holding.cost_dates, statement_date)
+        )
+    for currency, on in dates.items():
+        fx_service.get_historical_rates(db, currency, user.reporting_currency, on)
 
 
 def safe_file_name(file_name: str | None) -> str:

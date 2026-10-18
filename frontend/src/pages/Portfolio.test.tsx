@@ -1,7 +1,7 @@
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
-import { formatMoney } from '../format'
+import { formatDate, formatMoney, formatPercent } from '../format'
 import { CSRF, fakeApi } from '../test/fakeApi'
 import { fx, holding, portfolioData, reporting, totals } from '../test/fixtures'
 import { PortfolioPage } from './Portfolio'
@@ -61,12 +61,55 @@ describe('portfolio page', () => {
         fx_rates: [fx({ currency: 'INR', rate: '0.010500', rate_date: '2026-06-30', status: 'stale', issue: 'service_unavailable' })] }),
     }) } })
     render(<PortfolioPage />)
-    expect(await screen.findByText(formatMoney('11.55', 'EUR'))).toBeTruthy()
+    expect((await screen.findAllByText(formatMoney('11.55', 'EUR'))).length).toBeGreaterThan(0)
     expect(screen.getByText(/exchange rates are stale/i)).toBeTruthy()
     const rates = screen.getByRole('table', { name: /exchange rates into EUR/i })
     expect(within(rates).getByText('0.010500')).toBeTruthy()
     const native = screen.getByRole('table', { name: /totals in each currency \(not converted\)/i })
     expect(within(native).getByText(formatMoney('1100.00', 'INR'))).toBeTruthy()
+  })
+
+  it('splits the gain into market and currency gain and shows each cost at its purchase-time rate', async () => {
+    fakeApi({ 'GET /api/portfolio': { body: portfolioData({
+      reporting_currency: 'EUR', fx_required: true,
+      reporting_totals: reporting({ currency: 'EUR', unrealized_pnl: '2.10', currency_gain: '0.30', total_gain: '2.40',
+        total_gain_pct: '23.53', invested_value_pinned: '10.20' }),
+      holdings: [
+        holding({ pinned_cost: '10.20', cost_dates_from: '2026-01-31', cost_dates_to: '2026-04-30', cost_date_count: 2 }),
+        holding({ holding_id: 2, pinned_cost: '5.00' }),
+      ],
+    }) } })
+    render(<PortfolioPage />)
+    expect(await screen.findByRole('heading', { name: 'Gain split in EUR' })).toBeTruthy()
+    const figure = (term: string) => screen.getAllByText(term).find((e) => e.tagName === 'DT')!.nextElementSibling!.textContent
+    expect(figure("Market gain (price change, today's rate)")).toBe(formatMoney('2.10', 'EUR'))
+    expect(figure('Currency gain (exchange-rate change)')).toBe(formatMoney('0.30', 'EUR'))
+    expect(figure('Total gain')).toBe(`${formatMoney('2.40', 'EUR')} (${formatPercent('23.53')})`)
+    expect(figure('Total invested at purchase-time rates')).toBe(formatMoney('10.20', 'EUR'))
+    const table = screen.getByRole('table', { name: /holdings/i })
+    expect(within(table).getByRole('columnheader', { name: 'Cost in EUR at purchase-time rates' })).toBeTruthy()
+    expect(within(table).getByText(/2 purchase dates, /)).toBeTruthy()
+    expect(within(table).getByText(`rate of ${formatDate('2026-07-31')}`)).toBeTruthy()
+  })
+
+  it('shows no gain split or purchase-time column when everything is in the reporting currency', async () => {
+    fakeApi({ 'GET /api/portfolio': { body: portfolioData() } })
+    render(<PortfolioPage />)
+    await screen.findByRole('table', { name: /holdings/i })
+    expect(screen.queryByRole('heading', { name: /gain split/i })).toBeNull()
+    expect(screen.queryByRole('columnheader', { name: /purchase-time/i })).toBeNull()
+  })
+
+  it('says why the currency gain is missing when purchase-date rates are not available', async () => {
+    fakeApi({ 'GET /api/portfolio': { body: portfolioData({
+      reporting_currency: 'EUR', fx_required: true, pinned_fx_unavailable: ['INR'],
+      reporting_totals: reporting({ currency: 'EUR', currency_gain: null, total_gain: null, total_gain_pct: null,
+        invested_value_pinned: null, priced_invested_value_pinned: null }),
+      holdings: [holding({ pinned_cost: null, pinned_fx_rate: null })],
+    }) } })
+    render(<PortfolioPage />)
+    expect(await screen.findByText(/exchange rates of the purchase dates for INR could not be fetched yet/i)).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: /gain split/i })).toBeNull()
   })
 
   it('falls back to native totals when the reporting conversion is unavailable', async () => {
@@ -81,7 +124,7 @@ describe('portfolio page', () => {
     fakeApi({ 'GET /api/portfolio': { body: portfolioData({ contains_stale_prices: true,
       totals_by_currency: { INR: totals({ contains_stale_prices: true, counts: { ...totals().counts, stale: 1 } }) } }) } })
     render(<PortfolioPage />)
-    expect(await screen.findByText(/some prices are stale \(the price service could not be reached\); oldest from/i)).toBeTruthy()
+    expect(await screen.findByText(/some prices are stale: the last refresh brought no new price for them, so the last known one is used \(oldest from/i)).toBeTruthy()
     expect(screen.getAllByText(/1 of 1 priced · 1 stale/).length).toBeGreaterThan(0)
   })
 
@@ -140,5 +183,29 @@ describe('portfolio page', () => {
       expect(table.closest('[role="region"]')?.getAttribute('tabindex')).toBe('0')
     }
     expect(screen.getByText('Prices are cached for a few minutes; a refresh fetches new ones at most once a minute.')).toBeTruthy()
+  })
+
+  it('shows allocation, gain-or-loss and gain-split charts, each with its numbers as a table', async () => {
+    fakeApi({ 'GET /api/portfolio': { body: portfolioData({
+      reporting_currency: 'EUR', fx_required: true,
+      reporting_totals: reporting({ currency: 'EUR', priced_invested_value_pinned: '10.20', unrealized_pnl: '2.10',
+        currency_gain: '0.30', total_gain: '2.40', current_value: '12.60' }),
+      holdings: [holding({ instrument_name: 'GAINER', unrealized_pnl: '100.00' }),
+        holding({ holding_id: 2, instrument_name: 'LOSER', unrealized_pnl: '-40.00', unrealized_pnl_pct: '-4.00' })],
+    }) } })
+    render(<PortfolioPage />)
+    await screen.findByRole('heading', { name: 'Charts' })
+    const figures = screen.getAllByRole('figure')
+    expect(figures.map((f) => f.querySelector('figcaption')!.textContent)).toEqual([
+      'Where your money is: amount invested (INR)', 'Unrealised gain or loss per holding (INR)',
+      'Where the gain comes from: price vs exchange rate (EUR)'])
+    expect(within(figures[0]).getByRole('img').getAttribute('aria-label')).toMatch(/largest: GAINER/)
+    const pnl = within(figures[1]).getByRole('table')
+    expect(within(pnl).getAllByRole('row').slice(1).map((r) => r.textContent)).toEqual([
+      `GAINER${formatMoney('100.00', 'INR')}${formatPercent('10.00')}`, `LOSER${formatMoney('-40.00', 'INR')}${formatPercent('-4.00')}`])
+    expect(within(figures[2]).getByText('Currency gain').nextElementSibling!.textContent).toBe(formatMoney('0.30', 'EUR'))
+    await userEvent.click(within(figures[0]).getByRole('button', { name: 'By broker' }))
+    expect(within(figures[0]).getByRole('button', { name: 'By broker' }).getAttribute('aria-pressed')).toBe('true')
+    expect(within(within(figures[0]).getByRole('table')).getByText('Zerodha')).toBeTruthy()
   })
 })

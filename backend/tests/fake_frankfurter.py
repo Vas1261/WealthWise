@@ -1,6 +1,7 @@
 """A deterministic in-memory Frankfurter v2 for offline tests (served through httpx2.MockTransport)."""
 
 import json
+from datetime import date, timedelta
 from decimal import Decimal
 
 import httpx2
@@ -11,12 +12,17 @@ RATE_DATE = "2026-06-30"
 
 
 class FakeFrankfurter:
-    """rates: (base, quote) -> rate (str/number) | httpx2.Response | Exception; unknown pairs get 422."""
+    """rates: (base, quote) -> rate (str/number) | httpx2.Response | Exception; unknown pairs get 422.
+
+    history: (base, quote) -> {"YYYY-MM-DD": rate} | httpx2.Response | Exception for GET /v2/rates; a pair
+    without history answers every day of the requested range with its `rates` entry.
+    """
 
     def __init__(self):
         self.rates: dict[tuple[str, str], object] = {
             ("INR", "EUR"): "0.0105", ("USD", "EUR"): "0.88577", ("INR", "USD"): "0.0104", ("USD", "INR"): "96.14",
         }
+        self.history: dict[tuple[str, str], object] = {}
         self.currencies: object = ["EUR", "INR", "USD", "GBP", "JPY"]
         self.calls: list[str] = []
 
@@ -27,6 +33,8 @@ class FakeFrankfurter:
             if isinstance(self.currencies, (httpx2.Response, Exception)):
                 return self._outcome(self.currencies)
             return httpx2.Response(200, json=[{"iso_code": c, "name": c} for c in self.currencies])
+        if path == "/v2/rates":
+            return self._history(request)
         _, _, _, base, quote = path.split("/")
         outcome = self.rates.get((base, quote))
         if outcome is None:
@@ -35,6 +43,27 @@ class FakeFrankfurter:
             return self._outcome(outcome)
         body = f'{{"date":"{RATE_DATE}","base":"{base}","quote":"{quote}","rate":{outcome}}}'
         return httpx2.Response(200, content=body.encode(), headers={"content-type": "application/json"})
+
+    def _history(self, request: httpx2.Request) -> httpx2.Response:
+        params = request.url.params
+        base, quote = params["base"], params["quotes"]
+        start, end = date.fromisoformat(params["from"]), date.fromisoformat(params["to"])
+        outcome = self.history.get((base, quote), self.rates.get((base, quote)))
+        if outcome is None:
+            return httpx2.Response(422, json={"status": 422, "message": f"invalid currency: {base}"})
+        if isinstance(outcome, (httpx2.Response, Exception)):
+            return self._outcome(outcome)
+        if isinstance(outcome, dict):
+            rows = [(day, rate) for day, rate in outcome.items() if start <= date.fromisoformat(day) <= end]
+        else:
+            rows = [((start + timedelta(days=n)).isoformat(), outcome) for n in range((end - start).days + 1)]
+        body = "[" + ",".join(
+            f'{{"date":"{day}","base":"{base}","quote":"{quote}","rate":{rate}}}' for day, rate in rows
+        ) + "]"
+        return httpx2.Response(200, content=body.encode(), headers={"content-type": "application/json"})
+
+    def history_calls(self) -> list[str]:
+        return [c for c in self.calls if c == "/v2/rates"]
 
     @staticmethod
     def _outcome(outcome):

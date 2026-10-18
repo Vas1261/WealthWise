@@ -70,11 +70,15 @@ function EntryForm({ user, editing, categories, onSaved, onCancel }: {
       </fieldset>
       <label>
         Category
-        <input value={draft.category} onChange={set('category')} required list="entry-categories" maxLength={200} {...described('category')} />
+        {/* Suggestions only once there are categories: an empty list still shows a dropdown arrow in Safari. */}
+        <input value={draft.category} onChange={set('category')} required list={categories.length ? 'entry-categories' : undefined}
+          maxLength={200} {...described('category')} />
       </label>
-      <datalist id="entry-categories">
-        {categories.map((c) => <option key={c} value={c} />)}
-      </datalist>
+      {categories.length > 0 && (
+        <datalist id="entry-categories">
+          {categories.map((c) => <option key={c} value={c} />)}
+        </datalist>
+      )}
       <FieldError id="entry-category-error" message={fieldError('category')} />
       <label>
         Amount

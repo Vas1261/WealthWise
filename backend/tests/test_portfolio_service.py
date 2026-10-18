@@ -12,11 +12,11 @@ from pydantic import SecretStr
 
 from app.core.database import SessionLocal
 from app.domain.market import PriceIssue, PriceResult, PriceStatus
-from app.integrations.twelve_data import TwelveDataClient
+from app.integrations.upstox import UpstoxClient
 from app.services import market_service, portfolio_service
 from app.services.portfolio_service import PortfolioDataError
 from tests.portfolio_support import make_user, nh, seed
-from tests.test_market_service import FakeTwelveData
+from tests.test_market_service import FakeUpstox
 
 pytestmark = pytest.mark.usefixtures("migrated_db")
 
@@ -80,8 +80,8 @@ def test_one_get_prices_call_with_equities_only(user, market):
     assert len(market.calls) == 1
     refs, force = market.calls[0]
     assert force is False
-    assert [(r.isin, r.broker_symbol, r.asset_class) for r in refs] == [
-        ("INE000D01019", None, "equity"), ("INE000D01019", "SYNTHA", "equity"), ("INE000E01025", "SYNTHB", "equity")]
+    assert [(r.isin, r.asset_class) for r in refs] == [
+        ("INE000D01019", "equity"), ("INE000D01019", "equity"), ("INE000E01025", "equity")]
     assert all(r.asset_class != "mutual_fund" for r in refs)  # funds are never sent for pricing
 
 
@@ -183,25 +183,21 @@ def test_invalid_persisted_holding_raises_controlled_error_before_any_market_cal
     assert market.calls == []  # no API credits spent on corrupt data
 
 
-# --- Through the real Module 6 service (fake Twelve Data transport, no network) ---------------------
+# --- Through the real Module 6 service (fake Upstox transport, no network) ----------------------------
 
 def test_through_market_service_duplicate_isins_priced_once(user, monkeypatch):
     seed_mixed(user.id)
-    fake = FakeTwelveData()
-    fake.search["INE000D01019"] = [{"symbol": "SYNTHA", "instrument_name": "SYNTHA Ltd", "exchange": "NSE",
-                                    "mic_code": "XNSE", "exchange_timezone": "Asia/Kolkata",
-                                    "instrument_type": "Common Stock", "country": "India", "currency": "INR"}]
-    fake.search["INE000E01025"] = [{**fake.search["INE000D01019"][0], "symbol": "SYNTHB"}]
-    client = TwelveDataClient(SecretStr("unit-test-key-not-a-real-secret-0003"),
-                              transport=httpx2.MockTransport(fake.handle))
+    fake = FakeUpstox()
+    fake.quotes = {"NSE_EQ|INE000D01019": ("SYNTHA", 120), "NSE_EQ|INE000E01025": ("SYNTHB", 150)}
+    client = UpstoxClient(SecretStr("unit-test-token-not-a-real-secret-0003"),
+                          transport=httpx2.MockTransport(fake.handle))
     monkeypatch.setattr(market_service, "default_client", lambda: client)
     summary = portfolio(user)
-    assert fake.count("/price") == 2  # two distinct ISINs across three equity positions
-    assert fake.count("/symbol_search") == 2
+    assert len(fake.calls) == 1  # one request for the whole portfolio
+    assert fake.requested_isins() == ["INE000D01019", "INE000E01025"]  # two distinct ISINs, three positions
     assert {v.price.status for v in summary.holdings if v.position.asset_class == "equity"} == {PriceStatus.FRESH}
-    first_count = len(fake.calls)
     portfolio(user)  # second request inside the cache window: no new HTTP calls
-    assert len(fake.calls) == first_count
+    assert len(fake.calls) == 1
 
 
 def test_not_configured_and_no_network_or_fx_calls(user, monkeypatch):
@@ -212,7 +208,7 @@ def test_not_configured_and_no_network_or_fx_calls(user, monkeypatch):
 
     monkeypatch.setattr(socket.socket, "connect", no_network)
     monkeypatch.setattr(socket, "create_connection", no_network)
-    summary = portfolio(user)  # the key is blank in tests: Module 6 reports NOT_CONFIGURED without requests
+    summary = portfolio(user)  # the token is blank in tests: Module 6 reports NOT_CONFIGURED without requests
     equities = [v for v in summary.holdings if v.position.asset_class == "equity"]
     assert {(v.price.status, v.price.issue) for v in equities} == {(PriceStatus.UNAVAILABLE, PriceIssue.NOT_CONFIGURED)}
     assert summary.totals_by_currency["INR"].not_configured == 3
@@ -246,7 +242,7 @@ def _imports(relative: str) -> set[str]:
 @pytest.mark.parametrize("module", PORTFOLIO_MODULES)
 def test_portfolio_code_never_bypasses_market_service_or_does_fx(module):
     imports = _imports(module)
-    assert not any("integrations" in name or "twelve_data" in name or "httpx" in name for name in imports)
+    assert not any("integrations" in name or "upstox" in name or "httpx" in name for name in imports)
     assert "frankfurter" not in (APP / module).read_text().lower()
 
 

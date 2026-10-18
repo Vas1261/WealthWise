@@ -4,7 +4,7 @@ Never part of the default run. Enable explicitly, from backend/ (no API key exis
 
     RUN_LIVE_FRANKFURTER=1 .venv/bin/pytest -m live_frankfurter -s tests/test_frankfurter_live.py
 
-Prints public FX data only. Market prices stay offline (the Twelve Data key is blank in tests), so the
+Prints public FX data only. Market prices stay offline (the Upstox token is blank in tests), so the
 converted totals shown are cost totals; the FX path is the same for current value.
 """
 

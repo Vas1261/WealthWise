@@ -2,6 +2,7 @@
 
 No API key exists. Endpoints used:
 - GET /v2/rate/{base}/{quote} -> {"date": "YYYY-MM-DD", "base": "USD", "quote": "INR", "rate": 96.14}
+- GET /v2/rates?base=&quotes=&from=&to= -> [{"date": "YYYY-MM-DD", "base": "INR", "quote": "EUR", "rate": 0.00947}, ...]
 - GET /v2/currencies          -> [{"iso_code": "AED", ...}, ...]
 Rates are parsed straight from JSON into Decimal (never float). Every failure becomes a
 FrankfurterError carrying an FxIssue and a fixed message; upstream messages are never propagated.
@@ -70,6 +71,25 @@ class FrankfurterClient:
             raise FrankfurterError(FxIssue.INVALID_RESPONSE)
         return Quote(base, quote, rate, rate_date)
 
+    def rates_between(self, base: str, quote: str, start: date, end: date) -> list[tuple[date, Decimal]]:
+        """GET /v2/rates for one pair over a date range: (date, units of `quote` per one `base`), any order."""
+        if not (is_currency_code(base) and is_currency_code(quote)):
+            raise FrankfurterError(FxIssue.INVALID_CURRENCY)
+        body = self._get(
+            "/v2/rates", {"base": base, "quotes": quote, "from": start.isoformat(), "to": end.isoformat()}
+        )
+        if not isinstance(body, list):
+            raise FrankfurterError(FxIssue.INVALID_RESPONSE)
+        series = []
+        for row in body:
+            if not isinstance(row, dict) or row.get("base") != base or row.get("quote") != quote:
+                raise FrankfurterError(FxIssue.INVALID_RESPONSE)
+            try:
+                series.append((date.fromisoformat(row["date"]), parse_rate(row.get("rate"))))
+            except (InvalidRate, KeyError, TypeError, ValueError):
+                raise FrankfurterError(FxIssue.INVALID_RESPONSE) from None
+        return series
+
     def currencies(self) -> set[str]:
         """GET /v2/currencies: the ISO codes Frankfurter currently supports."""
         body = self._get("/v2/currencies")
@@ -80,9 +100,9 @@ class FrankfurterClient:
             raise FrankfurterError(FxIssue.INVALID_RESPONSE)
         return {code for code in codes if isinstance(code, str)}
 
-    def _get(self, path: str) -> object:
+    def _get(self, path: str, params: dict[str, str] | None = None) -> object:
         try:
-            response = self._http.get(path)
+            response = self._http.get(path, params=params)
         except httpx2.TransportError:  # timeouts, connection and protocol errors
             raise FrankfurterError(FxIssue.SERVICE_UNAVAILABLE) from None
         if response.status_code == 422:
