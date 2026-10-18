@@ -1,298 +1,159 @@
 # WealthWise
 
-Broker-independent personal wealth management platform. The authoritative build
-specification is `WealthWise_Build_Specification_v2.docx`.
+A broker-independent personal wealth management platform. You import the holdings statements your brokers
+export. WealthWise values them at live market prices in your chosen reporting currency and tracks income,
+expenses and budgets alongside the portfolio.
 
-## Layout
+Portfolio project for IU International University of Applied Sciences.
+
+## Features
+
+- **Accounts.** Users register and log in with email and password (bcrypt). Sessions use an HttpOnly JWT
+  cookie and a rotating refresh token, and every state-changing request is CSRF-protected.
+- **Import Center.** Accepts `.xlsx` statements from Zerodha (equity), Groww (equity) and Groww (mutual-fund
+  order history). The file type is recognised by content, not by file name, and row errors are reported per
+  row. Every import attempt is kept in a history.
+- **Portfolio.** Live prices come from Upstox (NSE, else BSE). It shows per-holding and total P&L, totals per
+  currency, and breakdowns by broker and asset class. Mutual funds are shown at cost, labelled as such.
+- **Currencies.** Each user picks a reporting currency, converted with live rates from Frankfurter. Rates
+  pinned to purchase dates split the total gain into market gain and currency gain.
+- **Personal finance.** Income and expense entries, monthly budgets per category, budget vs actual, cash
+  position and net worth.
+- **Reports.** Monthly finance and portfolio reports as PDF and CSV.
+- **Charts.** Allocation, gain/loss per holding, the gain split, and income vs expenses for the last 12
+  months. Every chart has a caption and a table of the underlying numbers.
+
+## Tech stack
+
+| Part      | Technology                                                       |
+|-----------|------------------------------------------------------------------|
+| Backend   | Python 3.11, FastAPI, SQLAlchemy 2, Alembic, Pydantic            |
+| Database  | SQLite (local), PostgreSQL 16 (deployment)                       |
+| Frontend  | React, TypeScript, Vite, Chart.js                                |
+| Reports   | ReportLab (PDF), standard CSV                                    |
+| APIs      | Upstox (market prices), Frankfurter (exchange rates)             |
+| Testing   | pytest, import-linter, Vitest, Testing Library                   |
+| Hosting   | Docker, Render                                                   |
+
+## Architecture
+
+The backend is layered. The layer order `api -> services -> repositories | integrations | adapters -> domain`
+is enforced by `.importlinter`, which also runs as part of the test suite.
 
 ```
-backend/    FastAPI + SQLAlchemy + Alembic (Python 3.11)
-  app/api/           Presentation: route handlers, no calculation logic
-  app/services/      Service: orchestration/sequencing only
-  app/domain/        Business/Domain: pure functions, no DB/HTTP/framework imports
-  app/adapters/      Broker file adapters (Adapter Pattern): read exports into NormalizedHolding, no DB access
-  app/integrations/  Clients for external APIs (Upstox, Frankfurter), called only by services
-  app/repositories/  Repository: persistence via SQLAlchemy only (no raw SQL)
-  app/models/        ORM models (User, ImportBatch, Holding, HoldingCostDate, HistoricalFxRate, ...)
+backend/
+  app/api/           HTTP route handlers, no calculation logic
+  app/services/      Orchestration and sequencing
+  app/domain/        Pure business rules (Decimal arithmetic), no DB/HTTP/framework imports
+  app/adapters/      One adapter per broker file format (Adapter Pattern)
+  app/integrations/  Clients for Upstox and Frankfurter
+  app/repositories/  Persistence through SQLAlchemy only
+  app/models/        ORM models
   app/core/          Settings and database session
-  alembic/           Migrations
-frontend/   React + Vite + TypeScript
+  alembic/           Database migrations
+frontend/
+  src/               React app: pages, API client, charts
 ```
 
 ## Running locally
 
+Backend (http://127.0.0.1:8000):
+
 ```sh
-# Backend
 cd backend
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-cp .env.example .env   # then set JWT_SECRET (see the comment in the file)
-.venv/bin/alembic upgrade head                 # again after every update that adds a migration
-.venv/bin/uvicorn app.main:app --reload --reload-dir app   # http://127.0.0.1:8000/health
-.venv/bin/pytest
-.venv/bin/lint-imports                         # architecture rules (.importlinter); also run by pytest
-RUN_PERFORMANCE=1 .venv/bin/pytest -m performance -s tests/test_performance.py   # NFR-01/NFR-02 timings
-
-# Frontend (proxies /api and /health to the backend)
-cd frontend
-npm install
-npm run dev                                    # http://localhost:5173
+cp .env.example .env                 # set JWT_SECRET; see the comments in the file
+.venv/bin/alembic upgrade head
+.venv/bin/uvicorn app.main:app --reload --reload-dir app
 ```
 
-## Running with Docker (deployment image)
-
-One image (`Dockerfile`): Node builds the frontend, then a slim Python image runs FastAPI and serves that
-build, so the browser sees one origin. On start it runs `alembic upgrade head`, then uvicorn on `$PORT`
-(default 8000) as a non-root user.
+Frontend (http://localhost:5173; it forwards `/api` to the backend):
 
 ```sh
-docker compose up --build      # app + PostgreSQL 16 on http://localhost:8000 (secrets from backend/.env)
-docker compose down            # stop; add -v to also delete the local database volume
+cd frontend
+npm install
+npm run dev
 ```
 
-**Render** (`render.yaml` Blueprint): a Docker web service and a free PostgreSQL database, both in Frankfurt.
-`DATABASE_URL` comes from the database, `JWT_SECRET` is generated by Render, `UPSTOX_ANALYTICS_TOKEN` is entered
-once in the dashboard; nothing secret is in the repository. The database accepts no connections from the
-internet (`ipAllowList: []`). Free-plan limits: the service sleeps after 15 minutes without traffic (about a
-minute to wake), and a free database expires 30 days after creation.
+## Configuration
 
-The test suite runs on either engine: `TEST_DATABASE_URL=postgresql://user@host/empty_db .venv/bin/pytest`.
+All settings live in `backend/.env`. `backend/.env.example` lists them with explanations.
 
-## Recorded decisions (beyond the spec)
+| Variable                 | Purpose                                                               |
+|--------------------------|-----------------------------------------------------------------------|
+| `DATABASE_URL`           | SQLite or PostgreSQL connection URL                                   |
+| `JWT_SECRET`             | Required, at least 32 characters                                      |
+| `APP_ENV`                | `development`, `test` or `production`                                 |
+| `COOKIE_SECURE`          | `true` for HTTPS; must be `true` in production                        |
+| `UPSTOX_ANALYTICS_TOKEN` | Optional; without it prices show as not configured                    |
+| `FX_ENABLED`             | `false` disables exchange-rate requests                               |
 
-- **Snapshot identity** is user + broker + asset class + statement date, enforced by the
-  `uq_import_batches_snapshot_identity` unique constraint. Groww equity
-  and Groww mutual funds are separate snapshots. Re-importing the same identity
-  replaces it; a newer statement date replaces the older snapshot for the same
-  user + broker + asset class; an older statement uploaded after a newer one must
-  not overwrite the newer snapshot.
-- **Frontend** is React + Vite + TypeScript.
-- **Authentication** (Module 2):
-  - Access JWT (15 min; claims `sub`, `sid`, `type`, `iat`, `exp`) and an opaque refresh
-    token (7 days) in HttpOnly, SameSite=Lax cookies. `COOKIE_SECURE` defaults to true and
-    the API refuses to start with `APP_ENV=production` and `COOKIE_SECURE=false`.
-  - Each login creates a row in `sessions`, which stores only the SHA-256 hash of the
-    current refresh token. Refresh rotates it in place; presenting an already-rotated
-    token revokes the session. Every authenticated request checks the session is active,
-    so logout takes effect immediately. Logout revokes only the current session.
-  - CSRF: double-submit token (readable `ww_csrf` cookie echoed in `X-CSRF-Token`) on
-    every state-changing request, including register and login (`GET /api/auth/csrf`
-    issues the cookie).
-  - Passwords: bcrypt, 8–72 UTF-8 bytes (rejected, never truncated). Emails are trimmed
-    and lowercased. Registering does not log the user in.
-- **Broker adapters** implement `BrokerAdapter`. `can_parse(file_path)` matches the spec;
-  `parse(file_path, import_batch_id) -> ParseResult` extends the spec's `parse(file_path)`
-  so it can stamp the import batch id and report per-row errors and the statement date.
-  Financial values are exact `Decimal`s; invalid rows are reported, never coerced to zero.
-- **Zerodha equity recognition (D1)**, for the Module 4 adapter. The real export titles its
-  sheets "Combined/Equity/Mutual Funds Holdings Statement as on <date>", while spec 3.2/4.2
-  quote only "Equity Holdings Statement"; the spec is unchanged and this rule applies it:
-  - A sheet qualifies only if it has a `Client ID` label, exactly one title that is
-    `Combined Holdings Statement as on YYYY-MM-DD` or `Equity Holdings Statement as on
-    YYYY-MM-DD` (whitespace-collapsed, case-sensitive; `Mutual Funds Holdings Statement` is
-    never accepted), and, below that title, a header row with exactly matched `Symbol`,
-    `ISIN`, `Quantity Available` and `Average Price`. Recognition is by content only, never
-    by file name, sheet name, or file date.
-  - Sheet priority: the qualifying `Combined` sheet, else the qualifying `Equity` sheet,
-    else the workbook is rejected. Only one sheet is read; sheets are never merged.
-  - The statement date comes only from the selected sheet's title (strict `YYYY-MM-DD`);
-    never from the file name, file dates, `Previous Closing Price`, or transaction dates.
-    A sheet whose title is missing, invalid, or duplicated does not qualify; non-qualifying
-    sheets never affect another sheet. Two qualifying sheets of the selected kind are
-    rejected as ambiguous, and a workbook with no qualifying sheet is rejected.
-  - On `Combined`, a row's `Instrument Type` must be `-` (equity); any other value,
-    including blank, is reported as an unsupported-instrument-type row error, never
-    imported as equity. Instruments are not classified by ISIN prefix (ETFs carry `INF`
-    ISINs). A `Combined` sheet without an `Instrument Type` column does not qualify, so
-    the `Equity` fallback applies. The `Equity` sheet has no `Instrument Type` column.
-  - Other columns (discrepant/long-term/pledged quantities, `Sector`, `Previous Closing
-    Price`, P&L columns) are not read.
-- **Market data (Module 6; provider changed from Twelve Data to Upstox).** `services/market_service.py`
-  serves cached live prices from Upstox through `integrations/upstox.py`; it never invents a price and
-  never uses a broker file's closing price. Market data is public, so the cache is global (no user link).
-  - Why Upstox: Twelve Data's free plan returns `not_entitled` for every NSE/BSE listing (it covers US
-    equities only). Upstox serves Indian prices free with a read-only Analytics Token (one year).
-  - No symbol lookup: Upstox addresses a listing as exchange segment + ISIN (`NSE_EQ|<ISIN>`,
-    `BSE_EQ|<ISIN>`), so each ISIN is asked for on both exchanges with `GET /v3/market-quote/ltp`, up to
-    500 keys (250 ISINs) per request: one request prices a whole portfolio. The NSE price is used when
-    there is one, else BSE; an ISIN on neither is `not_listed`. Never matched by name.
-  - Prices are cached per ISIN in `market_prices` with their exchange (migration 0007 replaced the
-    Twelve Data symbol and price caches). A price younger than `MARKET_PRICE_TTL_MINUTES` (5-15,
-    default 10) is served without a request; forced refresh has a 60-second floor; a failed refresh
-    serves the last price as `stale` with its timestamp (no age limit), otherwise `unavailable`.
-    Requests in one process take turns, so the dashboard's parallel net-worth and portfolio loads share
-    one price request.
-  - Every result has a status (`fresh`, `stale`, `unavailable`, `not_supported`) and, when not
-    fresh, an issue code; Upstox messages, URLs and headers never leave the client.
-    Mutual funds are `not_supported` (no Upstox call).
-  - `UPSTOX_ANALYTICS_TOKEN` lives only in `backend/.env`; it is optional (prices then report
-    `not_configured`), sent only in the `Authorization: Bearer` header, and never logged or returned.
-    Tests run offline with the token blanked; the live check is opt-in:
-    `RUN_LIVE_UPSTOX=1 [UPSTOX_LIVE_ISIN=<isin>] .venv/bin/pytest -m live_upstox -s tests/test_upstox_live.py`
-- **Import persistence and Portfolio Engine (Module 7).**
-  - `services/import_service.import_statement(db, user_id, file, name)` picks the adapter by
-    content (`can_parse`), parses, and stores an `ImportBatch` + `Holding` rows for the
-    authenticated user. Snapshot identity is user + broker + asset class + statement date: the
-    same identity is replaced; a newer statement becomes current; an older one is kept as history
-    but never current; an import with row errors and no valid rows is not stored at all. A valid
-    but empty statement (e.g. every fund redeemed) is a real, current, empty snapshot. Only the base
-    file name is stored.
-  - Import history is separate from snapshots: `import_attempts` records every attempt with its
-    result at import time - `current`, `history` (older than the current statement), `failed` (row
-    errors, no valid rows; never a snapshot) or `rejected` (unsupported, ambiguous or invalid file) -
-    plus file name, broker/asset class/statement date where known, row counts and whether it
-    replaced the same snapshot. `import_batches` holds only successful snapshots; a replaced
-    snapshot's attempt keeps its history row (its `batch_id` becomes NULL).
-  - `POST /api/imports` (session auth + CSRF, multipart field `file`, one `.xlsx` up to 5 MB): 201
-    with the result for stored imports; 422 with the result and row errors for a failed import;
-    422 `{detail, code}` for `unsupported_statement` / `ambiguous_statement` / `invalid_statement`;
-    415 `not_xlsx`; 413 `file_too_large`. The upload is streamed to a private temporary file that is
-    always deleted. Responses never include paths, holdings or cell values.
-  - Effective holdings: the user's latest snapshot per (broker, asset class), user-filtered in both
-    the snapshot selection and the result. Positions stay per broker even for the same ISIN.
-  - Valuation (`domain/portfolio.py`, pure Decimal, no internal rounding):
-    `invested = quantity x average_buy_price`; a price is usable only if Module 6 says fresh/stale,
-    a price exists and its currency is the holding's; then `current = quantity x price`,
-    `pnl = current - invested`, `pnl% = pnl / invested x 100` (none when invested is 0). Otherwise
-    current value and P&L stay empty, never zero or cost. Mutual funds are never priced; they show
-    a labelled `cost_floor_value` (their cost), never part of current value. Stale prices count but
-    flag the totals and expose the oldest price time.
-  - Totals are per currency (never summed across currencies): invested, priced invested, current,
-    P&L (against priced cost only), unpriced cost, fund cost floor, status counts, oldest price.
-    `reporting_totals` is filled only when every holding is in the user's reporting currency;
-    otherwise `fx_required` (Module 8). Breakdowns by asset class and broker.
-  - `holdings` enforce `quantity > 0` and `average_buy_price >= 0` (migration 0004); invalid stored
-    data yields a controlled 409, before any market request.
-  - API: `GET /api/portfolio`, `POST /api/portfolio/refresh` (CSRF; forces a price refresh within
-    Module 6's 60 s floor). User from the session only. One Market Service call per request, equities
-    only. Numbers are strings: money 2 dp, P&L % 2 dp, prices 4 dp (half-even), quantities as stored.
-- **Currency service (Module 8, decisions F1-F8).** `services/fx_service.py` gets live rates from
-  Frankfurter v2 (`GET /v2/rate/{base}/{quote}`, no API key) through `integrations/frankfurter.py`
-  (10 s timeout, rates parsed straight to Decimal, fixed error messages, upstream text never leaked).
-  - Same-currency conversion is exactly `Decimal("1")` with no request. Each (base, quote) pair is
-    cached in the process for `FX_CACHE_TTL_MINUTES` (60) and requested in the needed direction (no
-    locally derived inverses). A failed refresh serves the last good rate as `stale` (no age limit
-    within the process); with nothing cached the rate is `unavailable`. `FX_ENABLED=false` makes no
-    requests. The cache is per process and lost on restart (no table, no migration).
-  - Only top-level portfolio totals are converted into the user's reporting currency (holdings and
-    broker/asset-class breakdowns stay native). `reporting_totals` adds `fx_rates` (rate, date,
-    status, issue) and `fx_stale`; if any needed rate is unusable, `reporting_totals` is null and
-    `fx_unavailable` lists the currencies, never a partial total. Converted P&L uses today's rate for
-    cost and value (spec 2.7; no separate FX gain/loss). The fund cost floor is converted separately
-    and never joins current value; FX never fills a missing or mismatched market price.
-    `POST /api/portfolio/refresh` does not force FX.
-  - `PATCH /api/auth/me {"reporting_currency": "EUR"}` (session + CSRF) changes only the user's
-    reporting currency: three upper-case letters, supported by Frankfurter (`/v2/currencies`, cached
-    24 h); 422 `invalid_currency` / `unsupported_currency`, or 503 `currency_validation_unavailable`
-    when Frankfurter cannot be reached (nothing unverified is stored). Default stays INR.
-  - Tests run offline (`FX_ENABLED=false`); the live check is opt-in:
-    `RUN_LIVE_FRANKFURTER=1 .venv/bin/pytest -m live_frankfurter -s tests/test_frankfurter_live.py`
-- **Personal Finance (Module 9, decisions P1-P15).** `domain/finance.py` (pure Decimal rules),
-  `repositories/finance_repository.py`, `services/finance_service.py`, `api/finance.py`; tables
-  `finance_entries` and `budgets` (migration 0006). Backend only; the finance UI is Module 10.
-  - Entries: kind `income`/`expense`, category, amount, date (`YYYY-MM-DD`, 1900-9999, future allowed),
-    optional description (<= 255). Amounts are JSON strings, > 0, at most 2 decimals (up to the column's
-    18 whole digits); no floats, signs, exponents, NaN, whitespace or rounding. Money is stored exactly
-    (`ExactMoney` in `models/finance_entry.py`): `NUMERIC(20, 2)` on PostgreSQL, canonical decimal text
-    on SQLite (whose NUMERIC columns hold floats), always read back as `Decimal`; the CHECK compares
-    `CAST(amount AS NUMERIC) > 0` so it works on both. Categories are trimmed with internal whitespace
-    collapsed and matched exactly (case-sensitive, 1-50 characters, no category table).
-  - Currency: every entry and budget takes the user's reporting currency when it is created and keeps
-    it; the client never sends one and PUT never changes it, so changing the reporting currency never
-    reinterprets existing rows.
-  - Budgets: one per category per specific year-month (`YYYY-MM`), amount > 0, expenses only. The summary
-    compares each budget with that month's expenses in the same category and currency (`actual`,
-    `remaining`, `utilization_pct`, `over_budget`); other expenses are listed as `unbudgeted`.
-  - Cash position = income - expenses over all entries, per currency. Net worth = priced portfolio
-    current value (already in the reporting currency, Module 8) + cash converted at today's rate.
-    Unpriced holdings are left out (`complete=false`, `unpriced_holdings`); the mutual-fund
-    `cost_floor_value` is shown separately and never added. Any unusable FX rate gives a null total
-    (never a partial one) and lists the currency in `fx_unavailable`.
-  - API (`/api/finance`, session auth; POST/PUT/DELETE need CSRF): `POST/GET /entries` (filters `start`,
-    `end`, `kind`, `category`; newest first; no pagination), `GET/PUT/DELETE /entries/{id}` (PUT replaces
-    the whole entry), `POST /budgets`, `GET /budgets?month=`, `GET /budgets/summary?month=`,
-    `PUT /budgets/{id}` (amount only), `DELETE /budgets/{id}`, `GET /net-worth`. Another user's id is a
-    404. Money is strings at 2 dp. Errors are `{detail, code}` with fixed messages; schema errors on
-    finance routes omit FastAPI's echoed input. Finance values are never logged.
-  - The shared number formatter lives in `api/formatting.py` (moved unchanged from `api/portfolio.py`).
-  - Live demo (opt-in): `RUN_LIVE_FRANKFURTER=1 [RUN_LIVE_UPSTOX=1 UPSTOX_LIVE_ISIN=<isin>]
-    .venv/bin/pytest -m live_frankfurter -s tests/test_finance_live.py`
-- **Dashboard and UI (Module 10, decisions U1-U9).** React app in `frontend/src`: a hash router
-  (`route.ts`, no router dependency) with six signed-in pages - Dashboard, Portfolio, Imports, Finance,
-  Budgets, Settings - behind the existing cookie session.
-  - `api.ts` keeps auth in HttpOnly cookies (only the CSRF cookie is read and echoed on writes), one
-    shared refresh then one retry on 401, and a session-ended signal that drops all in-memory data
-    and returns to login. JSON and FormData (upload) bodies; every request uses `cache: 'no-store'`;
-    error `code` and body are kept. Nothing is stored in localStorage/sessionStorage.
-  - The frontend never calculates: totals, P&L, percentages, remaining budget, cash, net worth, FX
-    and price freshness all come from the backend. Money strings are formatted with
-    `Intl.NumberFormat` directly from the string (exact for 18 + 2 digits), never via
-    `Number()`/`parseFloat()`; `guard.test.ts` enforces this. Numbers use the browser locale.
-  - A missing value shows as "—" or an explanation, never 0. Mutual funds show "price unavailable:
-    shown at average buy price (floor)" with the cost floor in its own column, never added to current
-    value or net worth. Breakdowns stay in native currency. Stale prices, stale/unavailable FX,
-    unpriced holdings and currency mismatches are spelled out in text, not colour alone.
-  - Amounts and other inputs are sent exactly as typed; the backend validates. Deletes use the
-    native `confirm()`. The dashboard's budget summary is the browser-local current month.
-  - `GET /api/imports` (session auth, read-only) returns the user's import history newest first:
-    attempt id, result at import time, broker, asset class, statement date, file name, row counts,
-    `replaced_existing`, `imported_at`. No paths, batch ids, holdings or row errors.
-  - Tests: `cd frontend && npm test` (Vitest + jsdom + Testing Library, fake API, synthetic data);
-    `npx tsc -b`, `npm run lint` (oxlint), `npm run build`.
-- **Pinned FX (FR-20, TC-05; migration 0008).** Every stored holding records the dates its cost was paid
-  on (`holding_cost_dates`, domain `CostDate`, amounts are weights). Groww mutual funds take one per
-  purchase date from the order history. A holdings statement shows no trades, so an equity carries its
-  dates over from the same ISIN in the previous statement of that broker (average-cost method: units
-  still held keep their dates, scaled to the cost they still carry; only cost added since then is dated to
-  the new statement; sales, bonus and split shares date nothing new). A holding stored without cost dates
-  is pinned at its statement date.
-  - The rate of each cost date into the reporting currency is fetched once (one Frankfurter
-    `GET /v2/rates?base=&quotes=&from=&to=` per currency pair), stored in `historical_fx_rates` and never
-    changed. A date without its own rate takes the latest earlier one (10-day look-back). Rates are pinned
-    right after an import (best effort) and otherwise when the portfolio is next viewed.
-  - The portfolio adds per holding `pinned_fx_rate` / `pinned_cost` (amount-weighted rate of its cost
-    dates) and, in `reporting_totals`, `invested_value_pinned`, `currency_gain` (priced cost at today's rate
-    minus at pinned rates) and `total_gain` = `unrealized_pnl` (market gain at today's rate) +
-    `currency_gain`. If any pinned rate is missing, every pinned figure is null and `pinned_fx_unavailable`
-    names the currency (never a partial figure). Holdings in the reporting currency pin at exactly 1.
-  - Frankfurter quotes INR->EUR to five decimals (e.g. 0.00947), the same precision the live conversion uses.
-- **Reports (FR-23, FR-24).** `GET /api/reports/monthly?month=YYYY-MM&format=pdf|csv` (income, expenses
-  and net per currency, totals per category, budget vs actual, the month's entries) and
-  `GET /api/reports/portfolio?format=pdf|csv` (reporting totals with the gain split, totals per currency,
-  every holding with valuation, P&L, price status and pinned cost). Session auth, attachments,
-  `Cache-Control: no-store`. CSV is UTF-8 with a BOM and plain numbers; typed or imported text starting
-  with `= + - @` is prefixed with `'` (CSV injection). PDFs are built with ReportLab (escaped text,
-  ISO currency codes because the built-in fonts have no rupee sign). Download buttons are on the Portfolio
-  and Budgets pages.
-- **Architecture rules (NFR-09).** `.importlinter` forbids `app.domain` from importing the framework,
-  database, HTTP clients or any outer layer, and keeps the layer order api -> services ->
-  repositories | integrations | adapters -> domain. `tests/test_architecture.py` runs it with the suite.
-- **Performance (NFR-01, NFR-02).** Measured by the opt-in `tests/test_performance.py` with in-memory
-  price/FX stand-ins. On the development container: dashboard data for 5,000 entries + 500 holdings
-  (5,000 dated fund purchases) 0.7 s on first view, 0.5 s after; a 10,000-row Zerodha statement imported
-  in about 10 s, a 10,000-row Groww order history in about 5 s.
-- **Charts (Chart.js 4.5.1, as named in the Phase 1 technology table).** Portfolio page: amount invested
-  by holding (largest 10) / broker / asset class, unrealised gain or loss per priced holding, and, when the
-  reporting currency differs from a holding's, the gain split (market gain, currency gain, total gain).
-  Dashboard: the allocation chart and income vs expenses per month for the last 12 months
-  (`GET /api/finance/monthly-totals?end=YYYY-MM&months=1..36`, per currency, oldest first).
-  - Charts sit beside the tables, never instead of them: each has a caption, a screen-reader summary
-    (`role="img"`) and a "Show the numbers" table; tooltips and tables show the backend's exact strings.
-  - The never-a-float rule has one documented exception: `plot()` in `chartData.ts` converts a decimal
-    string to a number only to position and order marks; `guard.test.ts` allows it there and nowhere else.
-  - Colours are CSS tokens (`--chart-*`) with separate light and dark steps, checked for colour-blind
-    separation; gain/loss use blue/red, categories a fixed order. Axis ticks use plain grouped digits.
-  - Not possible yet: portfolio value over time (only the latest price per ISIN is kept); future scope.
-- **PostgreSQL (NFR-11, deployment).** Driver `psycopg` 3; a `postgres://`/`postgresql://` URL (as Render
-  gives it) is used with that driver. The whole suite passes on PostgreSQL 16 as well as SQLite. Two
-  engine differences were fixed: row ids in URLs are capped at 2^31-1 (PostgreSQL `INTEGER`; a larger id is a
-  422, never a 500), and tests compare constraint errors and timestamps independently of the engine.
-- **CSV import** is out of scope for this version (future scope); uploads are `.xlsx`.
-- **Health check.** `GET /health` is `ok` only when the database answers and is at the newest Alembic
-  revision. A database that is behind (code updated, `alembic upgrade head` not run) reports
-  `{"status": "degraded", "database": "migration_pending"}` with HTTP 503, and the page footer says so:
-  such a database lacks tables, so the routes that need them fail with a server error.
-- **Sample broker files** live in the git-ignored `sample_data/` folder as private reference
-  fixtures. Tests that use them skip when they are absent; all other adapter tests generate
-  small synthetic `.xlsx` files, so a fresh clone has a fully runnable test suite.
-- **Never commit** secrets, `.env`, SQLite databases, virtual environments,
-  `node_modules`, or personal/sample broker files (`*.xlsx`, `*.csv` are ignored).
+Never commit `.env`.
+
+## Tests
+
+```sh
+cd backend
+.venv/bin/pytest                     # full suite, including the architecture rules
+TEST_DATABASE_URL=postgresql://user@host/empty_db .venv/bin/pytest   # same suite on PostgreSQL
+
+cd frontend
+npm test                             # Vitest
+npm run lint && npm run build        # oxlint, type check and production build
+```
+
+Some checks are opt-in. Live API checks run only when `RUN_LIVE_UPSTOX=1` or `RUN_LIVE_FRANKFURTER=1` is
+set. Performance timings run with `RUN_PERFORMANCE=1 .venv/bin/pytest -m performance -s
+tests/test_performance.py`.
+
+## Docker and deployment
+
+A single image (`Dockerfile`) builds the frontend and serves it from FastAPI, so the app runs on one origin.
+On start it applies migrations and runs as a non-root user.
+
+```sh
+docker compose up --build            # app + PostgreSQL on http://localhost:8000
+docker compose down                  # add -v to delete the local database
+```
+
+`render.yaml` deploys the same image to Render, together with a PostgreSQL database in Frankfurt. Render
+generates `JWT_SECRET`, `UPSTOX_ANALYTICS_TOKEN` is entered in the Render dashboard, and no secret is
+stored in the repository. On the free plan the service sleeps after 15 minutes without traffic, so the
+first request afterwards can take up to a minute.
+
+## Key design decisions
+
+- **Holdings snapshots, not trade reconstruction.** Equity positions come from each broker's holdings
+  statement. Groww mutual funds are the one exception: Groww exports only an order history, so purchases
+  and redemptions are aggregated into units held and an average NAV.
+- **Snapshot identity.** A snapshot is identified by user, broker, asset class and statement date.
+  Re-importing the same statement replaces it. A newer statement becomes current. An older one is kept
+  as history and never overrides a newer one.
+- **No invented numbers.** Every price and exchange rate carries a status (fresh, stale, unavailable,
+  not supported). A missing price leaves the value empty, never zero or cost. Totals are kept per currency
+  and are converted only when every rate is available, never partially.
+- **Exact money.** All calculations use `Decimal`, and the API sends amounts as strings. The frontend
+  formats them but never calculates. A test enforces this, and `plot()` in `chartData.ts` is the one
+  documented exception, used only to position chart marks.
+- **Pinned exchange rates.** Each holding records the dates its cost was paid on. Historical rates for
+  those dates are fetched once and stored permanently. Currency gain is the cost at today's rate minus
+  the cost at the pinned rates.
+- **Security.** Refresh tokens are stored only as SHA-256 hashes, and logout takes effect immediately. CSV
+  exports are protected against formula injection. API tokens are never logged or returned.
+- **Health check.** `GET /health` reports `ok` only when the database answers and is at the newest
+  migration.
+
+## Limitations and future scope
+
+- Indian brokers and exchanges only. Other markets need further broker adapters and a global price
+  provider.
+- Mutual fund NAVs are not priced live.
+- CSV statement import.
+- Portfolio value over time (only the latest price is stored).
+- On Render's free plan, the database expires 30 days after creation.
+
+## Data and privacy
+
+Broker statements contain personal data, so `.xlsx`/`.csv` files, `sample_data/`, databases and `.env`
+are git-ignored and excluded from the Docker image. Tests that need the private sample files skip when
+those files are absent. All other tests generate synthetic files, so a fresh clone runs the full suite.

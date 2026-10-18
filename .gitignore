@@ -34,3 +34,6 @@ uploads/
 ~$*
 .vscode/
 .idea/
+
+# Private working documents
+*.docx
