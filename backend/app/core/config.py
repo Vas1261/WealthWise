@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 MIN_JWT_SECRET_LENGTH = 32
@@ -11,6 +11,8 @@ class Settings(BaseSettings):
 
     app_env: Literal["development", "test", "production"] = "development"
     database_url: str = "sqlite:///./wealthwise.db"
+    # Built frontend (frontend/dist) to serve from the API in one container; empty: API only.
+    frontend_dist: str = ""
 
     # Required by the API (checked at startup), not by Alembic migrations.
     jwt_secret: str = ""
@@ -32,6 +34,15 @@ class Settings(BaseSettings):
     fx_enabled: bool = True
     frankfurter_base_url: str = "https://api.frankfurter.dev"
     fx_cache_ttl_minutes: int = Field(default=60, ge=1)
+
+    @field_validator("database_url")
+    @classmethod
+    def _postgres_driver(cls, url: str) -> str:
+        """Hosts such as Render hand out postgres:// or postgresql:// URLs; use the installed psycopg 3 driver."""
+        for prefix in ("postgres://", "postgresql://"):
+            if url.startswith(prefix):
+                return "postgresql+psycopg://" + url[len(prefix):]
+        return url
 
 
 def check_app_settings(s: Settings) -> None:

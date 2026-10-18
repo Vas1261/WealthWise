@@ -1,0 +1,35 @@
+# Local run of the deployment image with PostgreSQL, the same pair Render runs:
+#   docker compose up --build        then open http://localhost:8000
+# Secrets come from backend/.env (JWT_SECRET, UPSTOX_ANALYTICS_TOKEN); the settings below override the rest.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: wealthwise
+      POSTGRES_USER: wealthwise
+      POSTGRES_PASSWORD: wealthwise-local-only
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wealthwise -d wealthwise"]
+      interval: 5s
+      retries: 10
+
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - path: backend/.env
+        required: false
+    environment:
+      DATABASE_URL: postgresql://wealthwise:wealthwise-local-only@db:5432/wealthwise
+      # Plain HTTP on localhost: Secure cookies would never be sent back, so this local run is "development".
+      APP_ENV: development
+      COOKIE_SECURE: "false"
+    ports:
+      - "8000:8000"
+
+volumes:
+  db-data:

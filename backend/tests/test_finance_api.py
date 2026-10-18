@@ -125,9 +125,10 @@ def test_other_users_rows_behave_as_not_found(alice, bob):
     ("DELETE", "/api/finance/budgets/{id}", None),
 ])
 def test_ids_beyond_the_database_integer_range_are_refused_not_a_server_error(alice, method, path, body):
-    too_big = send(alice, method, path.format(id=2**63), body)  # cannot be bound to a query at all
-    assert (too_big.status_code, too_big.json()["code"]) == (422, "invalid_request")
-    largest = send(alice, method, path.format(id=2**63 - 1), body)  # a valid id that simply does not exist
+    for too_big in (2**31, 2**63):  # beyond a PostgreSQL INTEGER / any 64-bit integer
+        response = send(alice, method, path.format(id=too_big), body)
+        assert (response.status_code, response.json()["code"]) == (422, "invalid_request")
+    largest = send(alice, method, path.format(id=2**31 - 1), body)  # a valid id that simply does not exist
     assert largest.status_code == 404
 
 

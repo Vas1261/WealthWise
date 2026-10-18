@@ -10,6 +10,7 @@ openpyxl==3.1.5
 httpx2==2.13.1
 python-multipart==0.0.32
 reportlab==5.0.1
+psycopg[binary]==3.3.6
 
 # dev / test
 pytest==9.1.1

@@ -38,9 +38,10 @@ CurrentUser = Annotated[User, Depends(get_current_user)]
 DbSession = Annotated[Session, Depends(get_session)]
 Kind = Literal["income", "expense"]
 T = TypeVar("T")
-# Row ids are 64-bit integers in the database. A larger number in the URL cannot even be bound to a query
-# (SQLite raises OverflowError, which surfaced as a 500), so it is refused like any other malformed id.
-MAX_ROW_ID = 2**63 - 1
+# Row ids are INTEGER columns: 32-bit on PostgreSQL, 64-bit on SQLite. A larger number in the URL cannot even
+# be bound to a query (OverflowError on SQLite, NumericValueOutOfRange on PostgreSQL, both a 500), so anything
+# above the smaller limit is refused like any other malformed id. No real id comes near it.
+MAX_ROW_ID = 2**31 - 1
 RowId = Annotated[int, Path(le=MAX_ROW_ID)]
 
 ISSUE_MESSAGES = {

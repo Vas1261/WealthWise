@@ -1,0 +1,19 @@
+# Keep secrets, personal data and local build output out of the image (and the build context).
+.git
+**/.env
+**/.env.*
+!**/.env.example
+**/*.db
+**/*.sqlite*
+sample_data/
+**/*.xlsx
+**/*.xls
+**/*.csv
+**/.venv/
+**/__pycache__/
+**/.pytest_cache/
+**/.ruff_cache/
+**/node_modules/
+frontend/dist/
+**/.DS_Store
+*.docx

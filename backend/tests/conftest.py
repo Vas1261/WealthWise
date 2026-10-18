@@ -8,8 +8,9 @@ from alembic import command
 from alembic.config import Config
 
 # Point the app at a throwaway database before any app module creates its engine.
+# TEST_DATABASE_URL runs the whole suite on another engine, e.g. an empty PostgreSQL database.
 _db_file = Path(tempfile.mkdtemp()) / "test.db"
-os.environ["DATABASE_URL"] = f"sqlite:///{_db_file}"
+os.environ["DATABASE_URL"] = os.environ.get("TEST_DATABASE_URL") or f"sqlite:///{_db_file}"
 os.environ["APP_ENV"] = "test"
 os.environ["JWT_SECRET"] = "test-secret-" + "x" * 40
 # The test client talks plain HTTP, which never sends Secure cookies back.

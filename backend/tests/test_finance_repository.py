@@ -1,16 +1,16 @@
 """Finance repository: every operation is scoped to its user; database constraints back the domain rules."""
 
 import random
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.dialects import postgresql
-from sqlalchemy.exc import IntegrityError, StatementError
+from sqlalchemy.exc import DataError, IntegrityError, StatementError
 from sqlalchemy.schema import CreateTable
 
-from app.core.database import SessionLocal
+from app.core.database import SessionLocal, engine
 from app.domain.finance import EntryRow, cash_by_currency
 from app.models import Budget, FinanceEntry
 from app.repositories import finance_repository as repo
@@ -20,6 +20,14 @@ from tests.portfolio_support import make_user
 pytestmark = pytest.mark.usefixtures("migrated_db")
 
 D = date(2026, 10, 5)
+# Constraint errors are worded differently by each engine ("CHECK constraint failed" on SQLite,
+# "violates check constraint" on PostgreSQL); both name the kind of constraint.
+CHECK_VIOLATION = "(?i)check constraint"
+UNIQUE_VIOLATION = "(?i)unique constraint"
+
+
+def as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def add_entry(db, user_id, amount="10", *, kind="expense", category="Food", day=D, currency="INR",
@@ -121,9 +129,8 @@ def test_replace_entry_keeps_currency_and_creation_time(two_users):
         e = repo.get_entry(db, alice, entry.id)
         assert (e.kind, e.category, e.amount, e.entry_date, e.description) == (
             "income", "Gift", Decimal("5.50"), date(2026, 1, 2), None)
-        # SQLite drops the timezone on read; compare the stored instant.
-        assert (e.currency, e.created_at.replace(tzinfo=None), e.user_id) == ("EUR", created.replace(tzinfo=None),
-                                                                              alice)
+        # SQLite drops the timezone on read, PostgreSQL returns it: compare the stored instant.
+        assert (e.currency, as_utc(e.created_at), e.user_id) == ("EUR", as_utc(created), alice)
 
 
 def test_set_budget_amount_changes_only_the_amount(two_users):
@@ -156,7 +163,7 @@ def test_database_rejects_non_positive_entry_amounts(two_users, amount):
     with SessionLocal() as db:
         db.add(FinanceEntry(user_id=two_users[0], kind="expense", category="Food", amount=Decimal(amount),
                             currency="INR", entry_date=D))
-        with pytest.raises(IntegrityError, match="CHECK"):
+        with pytest.raises(IntegrityError, match=CHECK_VIOLATION):
             db.commit()
 
 
@@ -164,7 +171,8 @@ def test_database_rejects_unknown_kind(two_users):
     with SessionLocal() as db:
         db.add(FinanceEntry(user_id=two_users[0], kind="transfer", category="Food", amount=Decimal("1"),
                             currency="INR", entry_date=D))
-        with pytest.raises(IntegrityError, match="CHECK"):
+        # SQLite: the CHECK constraint; PostgreSQL rejects it already as longer than the VARCHAR(7) column.
+        with pytest.raises((IntegrityError, DataError)):
             db.commit()
 
 
@@ -174,7 +182,7 @@ def test_database_rejects_invalid_budgets(two_users, amount, year, month):
     with SessionLocal() as db:
         db.add(Budget(user_id=two_users[0], category="Food", year=year, month=month, amount=Decimal(amount),
                       currency="INR"))
-        with pytest.raises(IntegrityError, match="CHECK"):
+        with pytest.raises(IntegrityError, match=CHECK_VIOLATION):
             db.commit()
 
 
@@ -186,7 +194,7 @@ def test_one_budget_per_user_category_and_month(two_users):
         add_budget(db, alice, month=11)
         add_budget(db, bob)  # other user
         db.commit()
-        with pytest.raises(IntegrityError, match="UNIQUE"):
+        with pytest.raises(IntegrityError, match=UNIQUE_VIOLATION):
             add_budget(db, alice, currency="EUR")  # currency is not part of the identity
 
 
@@ -220,6 +228,7 @@ def test_random_twenty_digit_amounts_round_trip_exactly(two_users):
         assert cash_by_currency(repo.list_cash_rows(db, alice))["INR"] == -sum(amounts, Decimal(0))
 
 
+@pytest.mark.skipif(engine.dialect.name != "sqlite", reason="SQLite storage detail; PostgreSQL has NUMERIC")
 def test_sqlite_stores_canonical_decimal_text_not_floats(two_users):
     with SessionLocal() as db:
         add_entry(db, two_users[0], "1499.5")
@@ -244,12 +253,12 @@ def test_money_type_refuses_rounding_and_non_decimals(two_users, amount):
 @pytest.mark.parametrize("stored", ["0", "0.00", "-1", "-0.01", "-999999999999999999.99"])
 def test_database_check_compares_numerically(two_users, stored):
     with SessionLocal() as db:
-        with pytest.raises(IntegrityError, match="CHECK"):
+        with pytest.raises(IntegrityError, match=CHECK_VIOLATION):
             db.execute(text("INSERT INTO finance_entries (user_id, kind, category, amount, currency, entry_date, "
                             "created_at, updated_at) VALUES (:u, 'expense', 'Food', :a, 'INR', '2026-10-05', "
                             "'2026-10-05', '2026-10-05')"), {"u": two_users[0], "a": stored})
         db.rollback()
-        with pytest.raises(IntegrityError, match="CHECK"):
+        with pytest.raises(IntegrityError, match=CHECK_VIOLATION):
             db.execute(text("INSERT INTO budgets (user_id, category, year, month, amount, currency, created_at, "
                             "updated_at) VALUES (:u, 'Food', 2026, 10, :a, 'INR', '2026-10-05', '2026-10-05')"),
                        {"u": two_users[0], "a": stored})

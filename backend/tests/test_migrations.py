@@ -110,7 +110,7 @@ def test_snapshot_identity_is_unique(migrated_db):
         session.add(user)
         session.flush()
         session.add_all([_batch(user.id), _batch(user.id)])
-        with pytest.raises(IntegrityError, match="UNIQUE"):
+        with pytest.raises(IntegrityError, match="(?i)unique constraint"):
             session.commit()
 
 
